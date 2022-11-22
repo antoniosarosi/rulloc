@@ -4,3 +4,4 @@ mod mmap;
 
 pub use align::align;
 pub use bump::BumpAllocator;
+pub use mmap::MmapAllocator;

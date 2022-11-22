@@ -4,8 +4,8 @@ use libc::{c_void, intptr_t, sbrk};
 
 use crate::align;
 
-// TODO: Implement `alloc::alloc::GloballAlloc` trait. Probably using
-// `std::cell::UnsafeCell`?
+// TODO: Implement [`alloc::alloc::GloballAlloc`] trait. Probably using
+// [`std::cell::UnsafeCell`] or using a global `static` variable.
 
 /// Block header, contains metadata about the block.
 struct Header {

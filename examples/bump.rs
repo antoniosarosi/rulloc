@@ -20,7 +20,11 @@ fn main() {
     let mut allocator = BumpAllocator::new();
 
     unsafe {
-        println!("PID = {}, Program break = {:?}", std::process::id(), sbrk(0));
+        println!(
+            "PID = {}, Program break = {:?}",
+            std::process::id(),
+            sbrk(0)
+        );
         block_until_enter_pressed();
 
         // Allocate space for unsigned 32 bit integer (4 bytes)
