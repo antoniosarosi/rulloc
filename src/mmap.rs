@@ -179,6 +179,11 @@ impl Block {
         (self as *const Self).offset(1) as *mut u8
     }
 
+    /// See [`FreeBlockLinks`] struct for details.
+    pub unsafe fn free_block_links(&self) -> *mut FreeBlockLinks {
+        self.content_address() as *mut FreeBlockLinks
+    }
+
     /// Returns the pointer to the next free block. Free list is stored as
     /// pointers in the content part of free blocks.
     ///
@@ -192,8 +197,12 @@ impl Block {
     /// +----------------------------+
     /// ```
     pub unsafe fn next_free(&self) -> *mut Self {
-        let links = self.content_address() as *mut FreeBlockLinks;
-        (*links).next
+        (*self.free_block_links()).next
+    }
+
+    /// See [`FreeBlockLinks`] struct and [`Self::next_free`] method.
+    pub unsafe fn set_next_free(&self, next_free: *mut Block) {
+        (*self.free_block_links()).next = next_free;
     }
 
     /// Returns the pointer to the previous free block. Free list is stored as
@@ -209,8 +218,12 @@ impl Block {
     /// +----------------------------+
     /// ```
     pub unsafe fn prev_free(&self) -> *mut Self {
-        let links = self.content_address() as *mut FreeBlockLinks;
-        (*links).prev
+        (*self.free_block_links()).prev
+    }
+
+    /// See [`FreeBlockLinks`] struct and [`Self::prev_free`] method.
+    pub unsafe fn set_prev_free(&self, prev_free: *mut Block) {
+        (*self.free_block_links()).prev = prev_free;
     }
 }
 
@@ -248,10 +261,13 @@ impl MmapAllocator {
         let mut free_block = self.find_free_block(content_size);
 
         if !free_block.is_null() {
-            // TODO: Block splitting.
+            self.split_free_block_if_possible(free_block, content_size);
             (*free_block).is_free = false;
             (*(*free_block).region).used_by_user += content_size;
             (*(*free_block).region).used_by_allocator -= mem::size_of::<FreeBlockLinks>();
+            if (*free_block).prev_free() != self.first_free_block {
+                (*(*free_block).prev_free()).set_next_free((*free_block).next_free());
+            }
             return (*free_block).content_address();
         }
 
@@ -281,57 +297,44 @@ impl MmapAllocator {
 
         // We've allocated more than needed, so now we have a free block.
         if (*region).length > mem::size_of::<Region>() + mem::size_of::<Block>() + content_size {
-            // Remaining chunk size.
-            let chunk_size = (*region).length - mem::size_of::<Region>() - (*block).total_size();
-
-            // Write block.
-            free_block = (*block).content_address().add(content_size) as *mut Block;
-            *free_block = Block {
-                region,
-                is_free: true,
-                next: ptr::null_mut(),
-                prev: block,
-                size: chunk_size - mem::size_of::<Block>(),
-            };
-
-            // Write links to previous and next free blocks.
-            let content_address = (*free_block).content_address() as *mut FreeBlockLinks;
-            *content_address = FreeBlockLinks {
-                next: ptr::null_mut(),
-                prev: self.last_free_block,
-            };
-
-            // Update stats.
-            (*region).num_blocks += 1;
-            (*region).used_by_allocator += mem::size_of::<Block>();
-
-            // Update free list.
-            if self.first_free_block.is_null() {
-                self.first_free_block = free_block;
-                self.last_free_block = free_block;
-            } else {
-                (*self.last_free_block).next = free_block;
-                self.last_free_block = free_block;
-            }
+            self.add_free_block_next_to(block);
         }
 
         (*block).content_address()
     }
 
-    pub unsafe fn dealloc(&self, address: *mut u8) {
+    /// Deallocates the given pointer. Memory might not be returned to the OS
+    /// if the region where `address` is located still contains used blocks.
+    /// However, the freed block will be reused later if possible.
+    pub unsafe fn dealloc(&mut self, address: *mut u8) {
         let mut block = Block::from_content_address(address);
-
-        // TODO: Block coalescing.
 
         (*block).is_free = true;
 
+        (*(*block).region).num_blocks -= 1;
         (*(*block).region).used_by_allocator += mem::size_of::<FreeBlockLinks>();
         (*(*block).region).used_by_user -= (*block).size;
 
-        let length = (*(*block).region).length as libc::size_t;
+        // Update free list.
+        (*block).set_next_free(ptr::null_mut());
+        (*block).set_prev_free(self.last_free_block);
+        if self.first_free_block.is_null() {
+            self.first_free_block = block;
+        } else {
+            (*self.last_free_block).set_next_free(block);
+        }
+        self.last_free_block = block;
 
-        if libc::munmap(address as *mut libc::c_void, length) != 0 {
-            // TODO: What should we do here? Panic?
+        self.merge_free_blocks_if_possible(block);
+
+        // All blocks have been merged into one, so we can return this region
+        // back to the kernel.
+        if (*(*block).region).num_blocks == 1 {
+            let length = (*(*block).region).length as libc::size_t;
+
+            if libc::munmap(address as *mut libc::c_void, length) != 0 {
+                // TODO: What should we do here? Panic?
+            }
         }
     }
 
@@ -431,11 +434,10 @@ impl MmapAllocator {
 
         if self.first_region.is_null() {
             self.first_region = region;
-            self.last_region = region;
         } else {
             (*self.last_region).next = region;
-            self.last_region = region;
         }
+        self.last_region = region;
 
         self.num_regions += 1;
 
@@ -455,6 +457,189 @@ impl MmapAllocator {
 
         ptr::null_mut()
     }
+
+    /// Fill the unused part of a region with a newly created free block. Should
+    /// only be called if the region that holds the given `block` actually has
+    /// an unused chunk at the end that can fit a new block of at least
+    /// [`MIN_BLOCK_SIZE`]. See [`Self::determine_region_length`] for more
+    /// details.
+    unsafe fn add_free_block_next_to(&mut self, block: *mut Block) {
+        // Remaining chunk size.
+        let chunk_size =
+            (*(*block).region).length - mem::size_of::<Region>() - (*block).total_size();
+
+        // Write block.
+        let free_block = (*block).content_address().add((*block).size) as *mut Block;
+        *free_block = Block {
+            region: (*block).region,
+            is_free: true,
+            next: ptr::null_mut(),
+            prev: block,
+            size: chunk_size - mem::size_of::<Block>(),
+        };
+
+        // Write links to previous and next free blocks.
+        let content_address = (*free_block).content_address() as *mut FreeBlockLinks;
+        *content_address = FreeBlockLinks {
+            next: ptr::null_mut(),
+            prev: self.last_free_block,
+        };
+
+        // Update stats.
+        (*(*block).region).num_blocks += 1;
+        (*(*block).region).used_by_allocator += mem::size_of::<Block>();
+
+        // Update free list.
+        if self.first_free_block.is_null() {
+            self.first_free_block = free_block;
+        } else {
+            (*self.last_free_block).next = free_block;
+        }
+        self.last_free_block = free_block;
+    }
+
+    /// Block splitting algorithm implementation. Let's say we have a free block
+    /// that can hold 64 bytes and a request to allocate 8 bytes has been made.
+    /// We'll split the free block in two different blocks, like so:
+    ///
+    /// **Before**:
+    ///
+    /// ```text
+    ///         +-->  +-----------+
+    ///         |     |   Header  | <- H bytes (depends on word size and stuff).
+    /// Block   |     +-----------+
+    ///         |     |  Content  | <- 64 bytes.
+    ///         +-->  +-----------+
+    /// ```
+    /// **After**:
+    ///
+    /// ```text
+    ///         +-->  +-----------+
+    ///         |     |   Header  | <- H bytes.
+    /// Block 1 |     +-----------+
+    ///         |     |  Content  | <- 8 bytes.
+    ///         +-->  +-----------+
+    ///         |     |   Header  | <- H bytes.
+    /// Block 2 |     +-----------+
+    ///         |     |  Content  | <- 64 bytes - H bytes.
+    ///         +-->  +-----------+
+    /// ```
+    unsafe fn split_free_block_if_possible(&mut self, block: *mut Block, size: usize) {
+        // If there's not enough space available we can't split the block.
+        if (*block).size < size + mem::size_of::<Block>() + MIN_BLOCK_SIZE {
+            return;
+        }
+
+        // If we can, the block is located `size` bytes after the initial
+        // content address of the current block.
+        let new_block = (*block).content_address().add(size) as *mut Block;
+        *new_block = Block {
+            prev: block,
+            next: (*block).next,
+            size: (*block).size - size - mem::size_of::<Block>(),
+            is_free: true,
+            region: (*block).region,
+        };
+
+        // The current block can only hold `size` bytes from now on.
+        (*block).size = size;
+
+        // Update free list. The block that we split is about to be used, but
+        // as of right now it is a valid free block.
+        (*new_block).set_next_free((*block).next_free());
+        (*new_block).set_prev_free(block);
+        (*block).set_next_free(new_block);
+
+        // Update stats.
+        (*(*block).region).num_blocks += 1;
+        (*(*block).region).used_by_allocator += mem::size_of::<Block>();
+    }
+
+    /// This function performs the inverse of [`Self::split_free_block_if_possible`].
+    /// If surrounding blocks are free, then we'll merge them all into one
+    /// bigger block.
+    ///
+    /// **Before**:
+    ///
+    /// ```text
+    ///                         +-->  +-----------+
+    ///                         |     |   Header  |
+    /// Block A, Free           |     +-----------+
+    ///                         |     |  Content  | <- A bytes.
+    ///                         +-->  +-----------+
+    ///                         |     |   Header  |
+    /// Block B, Recently freed |     +-----------+
+    ///                         |     |  Content  | <- B bytes.
+    ///                         +-->  +-----------+
+    ///                         |     |   Header  |
+    /// Block C, Free           |     +-----------+
+    ///                         |     |  Content  | <- C bytes.
+    ///                         +-->  +-----------+
+    /// ```
+    ///
+    /// **After**:
+    ///
+    /// ```text
+    ///
+    ///                         +-->  +-----------+
+    ///                         |     |   Header  |
+    /// Block D, Bigger block   |     +-----------+
+    ///                         |     |  Content  | <- A + B + C bytes.
+    ///                         +-->  +-----------+
+    /// ```
+    unsafe fn merge_free_blocks_if_possible(&mut self, block: *mut Block) {
+        if !(*block).next.is_null() && (*(*block).next).is_free {
+            self.merge_next_block(block);
+        }
+
+        if !(*block).prev.is_null() && (*(*block).prev).is_free {
+            self.merge_next_block((*block).prev);
+        }
+    }
+
+    /// Helper for block merging algorithm. Blocks can only be merged from right
+    /// to left, or from next to current, because the new bigger block address
+    /// should be the address of the first free block. So, given a valid block,
+    /// this function will merge the next adjacent block into the given block
+    /// and update all data structures. This functions also assumes that the
+    /// given block is free and the next block to it is also free and not null.
+    ///
+    /// ```text
+    /// +----------------+---------------+
+    /// |    Block A     |   Block B     |
+    /// +----------------+---------------+
+    ///        ^                 |
+    ///        |                 |
+    ///        +-----------------+
+    ///           Merge B into A
+    /// ```
+    unsafe fn merge_next_block(&mut self, block: *mut Block) {
+        (*block).size += (*(*block).next).total_size();
+
+        // Copy free list links into the current block.
+        (*block).set_next_free((*(*block).next).next_free());
+        (*block).set_prev_free((*(*block).next).prev_free());
+
+        // Update free list.
+        if !(*block).next_free().is_null() {
+            (*(*block).next_free()).set_prev_free(block);
+        }
+        if !(*block).prev_free().is_null() {
+            (*(*block).prev_free()).set_next_free(block);
+        }
+
+        (*block).next = (*(*block).next).next;
+        if !(*block).next.is_null() {
+            (*(*block).next).prev = block;
+        }
+        // Previous block in the same region was already pointinig to
+        // current block, so we don't have to update it.
+
+        (*(*block).region).num_blocks -= 1;
+        // We lost one header and two free list pointers
+        (*(*block).region).used_by_allocator -=
+            mem::size_of::<Block>() + mem::size_of::<FreeBlockLinks>();
+    }
 }
 
 #[cfg(test)]
@@ -466,11 +651,33 @@ mod tests {
         let mut allocator = MmapAllocator::new();
 
         unsafe {
-            let first_addr =
-                allocator.alloc(Layout::array::<u8>(4096 - 88 - 48).unwrap()) as *mut u8;
-            *first_addr = 100;
+            // Basic checks.
 
-            assert_eq!(*first_addr, 100);
+            // Request 1 byte, should call `mmap` with length of PAGE_SIZE.
+            let first_addr = allocator.alloc(Layout::new::<u8>()) as *mut u8;
+            // We'll use this later to check memory corruption.
+            *first_addr = 69;
+
+            // First region should be PAGE_SIZE in length.
+            assert_eq!((*allocator.first_region).length, PAGE_SIZE);
+
+            let first_block = (*allocator.first_region).first_block_address();
+
+            // First block should be located after the region header.
+            assert_eq!(
+                first_block as usize - allocator.first_region as usize,
+                mem::size_of::<Region>()
+            );
+
+            // Size of first block should be minimum size because we've
+            // requested 1 byte only.
+            assert_eq!((*first_block).size, MIN_BLOCK_SIZE);
+
+            // First free block should be located after region header.
+            assert_eq!(
+                (*allocator.first_free_block).size,
+                PAGE_SIZE - mem::size_of::<Region>() - mem::size_of::<Block>() * 2 - MIN_BLOCK_SIZE
+            );
         }
     }
 }
