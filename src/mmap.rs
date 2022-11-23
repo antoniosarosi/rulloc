@@ -528,7 +528,7 @@ impl MmapAllocator {
     ///         +-->  +-----------+
     ///         |     |   Header  | <- H bytes.
     /// Block 2 |     +-----------+
-    ///         |     |  Content  | <- 64 bytes - H bytes.
+    ///         |     |  Content  | <- 64 bytes - 8 bytes - H bytes.
     ///         +-->  +-----------+
     /// ```
     unsafe fn split_free_block_if_possible(&mut self, block: *mut Block, size: usize) {
@@ -642,7 +642,7 @@ impl MmapAllocator {
         // current block, so we don't have to update it.
 
         (*(*block).region).num_blocks -= 1;
-        // We lost one header after mergin the next block.
+        // We lost one header after merging the next block.
         (*(*block).region).used_by_allocator -= mem::size_of::<Block>();
     }
 
@@ -668,7 +668,8 @@ impl MmapAllocator {
     }
 
     /// Append the given block to the free list. Undefined behaviour if the
-    /// block is not free. See [`FreeBlockLinks`].
+    /// block content is used for anything other than pointers to next/prev
+    /// free blocks after this action. See [`FreeBlockLinks`].
     unsafe fn append_block_to_free_list(&mut self, block: *mut Block) {
         (*block).set_next_free(ptr::null_mut());
         (*block).set_prev_free(self.last_free_block);
@@ -684,6 +685,7 @@ impl MmapAllocator {
         self.num_free_blocks += 1;
     }
 
+    /// Some quick and dirty statistics.
     pub unsafe fn print_stats(&self) {
         println!("{self:?}\n");
 
