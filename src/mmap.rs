@@ -153,7 +153,7 @@ pub struct MmapAllocator {
 }
 
 impl Block {
-    /// Returns the block header associated to the given `address`.
+    /// Returns the block header located before `address`.
     ///
     /// # Arguments
     ///
@@ -268,10 +268,11 @@ impl MmapAllocator {
 
         let mut free_block = self.find_free_block(content_size);
 
+        // We found a free block, if it's too big we'll split it in two and
+        // return to the user a new block that can only fit the requested size.
         if !free_block.is_null() {
             self.split_free_block_if_possible(free_block, content_size);
-            self.unlink_block_from_free_list(free_block);
-            (*free_block).is_free = false;
+            self.remove_block_from_free_list(free_block);
             (*(*free_block).region).used_by_user += (*free_block).size;
             return (*free_block).content_address();
         }
@@ -316,7 +317,6 @@ impl MmapAllocator {
 
         (*(*block).region).used_by_user -= (*block).size;
 
-        // Update free list.
         self.append_block_to_free_list(block);
 
         // If left block is merged then the address will change.
@@ -325,14 +325,15 @@ impl MmapAllocator {
         // All blocks have been merged into one, so we can return this region
         // back to the kernel.
         if (*(*block).region).num_blocks == 1 {
-            let length = (*(*block).region).length as libc::size_t;
+            // The free block in this region is no longer valid because this
+            // region is about to be unmapped.
+            self.remove_block_from_free_list(block);
             // Region has to be removed before unmapping, otherwise seg fault.
             self.remove_region((*block).region);
-            self.unlink_block_from_free_list(block);
+            let length = (*(*block).region).length as libc::size_t;
             if libc::munmap(address as *mut libc::c_void, length) != 0 {
-                // TODO: What should we do here? Panic?
-            } else {
-                // TODO: Region memory is still valid here, it wasn't unmapped.
+                // TODO: What should we do here? Panic? Memory region is still
+                // valid here, it wasn't unmapped.
             }
         }
     }
@@ -552,8 +553,7 @@ impl MmapAllocator {
         // The current block can only hold `size` bytes from now on.
         (*block).size = size;
 
-        // Update free list. The block that we split is about to be used, but
-        // as of right now it is a valid free block.
+        // Update free list.
         self.append_block_to_free_list(new_block);
 
         // Update stats.
@@ -626,8 +626,8 @@ impl MmapAllocator {
         // First update free list. The new bigger block will become the
         // last block, and the 2 old smaller blocks will "dissapear" from the
         // list.
-        self.unlink_block_from_free_list((*block).next);
-        self.unlink_block_from_free_list(block);
+        self.remove_block_from_free_list((*block).next);
+        self.remove_block_from_free_list(block);
         self.append_block_to_free_list(block);
 
         // Now this block is bigger.
@@ -649,7 +649,7 @@ impl MmapAllocator {
     /// This is basically the doubly linked list removal algorithm. Assumes
     /// that the given block is part of the free list. See [`FreeBlockLinks`]
     /// for more details. Expect undefined behaviour otherwise.
-    unsafe fn unlink_block_from_free_list(&mut self, block: *mut Block) {
+    unsafe fn remove_block_from_free_list(&mut self, block: *mut Block) {
         if self.num_free_blocks == 1 {
             self.last_free_block = ptr::null_mut();
             self.first_free_block = ptr::null_mut();
@@ -664,6 +664,7 @@ impl MmapAllocator {
             (*(*block).next_free()).set_prev_free((*block).prev_free());
         }
 
+        (*block).is_free = false;
         self.num_free_blocks -= 1;
     }
 
