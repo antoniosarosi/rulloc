@@ -569,15 +569,15 @@ impl MmapAllocator {
     ///
     /// ```text
     ///                         +-->  +-----------+
-    ///                         |     |   Header  |
+    ///                         |     |   Header  | <- H bytes.
     /// Block A, Free           |     +-----------+
     ///                         |     |  Content  | <- A bytes.
     ///                         +-->  +-----------+
-    ///                         |     |   Header  |
+    ///                         |     |   Header  | <- H bytes.
     /// Block B, Recently freed |     +-----------+
     ///                         |     |  Content  | <- B bytes.
     ///                         +-->  +-----------+
-    ///                         |     |   Header  |
+    ///                         |     |   Header  | <- H bytes.
     /// Block C, Free           |     +-----------+
     ///                         |     |  Content  | <- C bytes.
     ///                         +-->  +-----------+
@@ -588,9 +588,9 @@ impl MmapAllocator {
     /// ```text
     ///
     ///                         +-->  +-----------+
-    ///                         |     |   Header  |
+    ///                         |     |   Header  | <- H bytes.
     /// Block D, Bigger block   |     +-----------+
-    ///                         |     |  Content  | <- A + B + C bytes.
+    ///                         |     |  Content  | <- A + B + C + 2H bytes.
     ///                         +-->  +-----------+
     /// ```
     unsafe fn merge_free_blocks_if_possible(&mut self, mut block: *mut Block) -> *mut Block {
