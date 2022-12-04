@@ -36,12 +36,12 @@ unsafe fn page_size() -> usize {
 /// because the compiler will yell at us if we don't write code for the `None`
 /// case. I think variance doesn't have much implications here except for
 /// [`LinkedList<T>`], but that should probably be covariant anyway.
-type Link<T> = Option<NonNull<T>>;
+type Pointer<T> = Option<NonNull<T>>;
 
 /// Linked list node. See also [`Header<T>`].
 struct Node<T> {
-    next: Link<Self>,
-    prev: Link<Self>,
+    next: Pointer<Self>,
+    prev: Pointer<Self>,
     data: T,
 }
 
@@ -57,8 +57,8 @@ type Header<T> = Node<T>;
 /// if you want a simpler version without this abstraction check this commit:
 /// [`37b7752e2daa6707c93cd7badfa85c168f09aac8`](https://github.com/antoniosarosi/memalloc-rust/blob/37b7752e2daa6707c93cd7badfa85c168f09aac8/src/mmap.rs)
 struct LinkedList<T> {
-    head: Link<Node<T>>,
-    tail: Link<Node<T>>,
+    head: Pointer<Node<T>>,
+    tail: Pointer<Node<T>>,
     len: usize,
     marker: PhantomData<T>,
 }
@@ -198,6 +198,9 @@ struct Region {
 /// [`37b7752e2daa6707c93cd7badfa85c168f09aac8`](https://github.com/antoniosarosi/memalloc-rust/blob/37b7752e2daa6707c93cd7badfa85c168f09aac8/src/mmap.rs#L649-L687)
 type FreeListNode = Node<()>;
 
+/// See [`FreeListNode`].
+type FreeList = LinkedList<()>;
+
 /// General purpose allocator. All memory is requested from the kernel using
 /// [`libc::mmap`] and some tricks and optimizations are implemented such as
 /// free list, block coalescing and block splitting.
@@ -261,8 +264,8 @@ impl<T> Header<T> {
 }
 
 impl Header<Block> {
-    pub unsafe fn from_free_list_node(links: *mut FreeListNode) -> *mut Self {
-        Self::from_content_address(links as *mut u8)
+    pub unsafe fn from_free_list_node(links: *mut FreeListNode) -> NonNull<Self> {
+        NonNull::new_unchecked(Self::from_content_address(links as *mut u8))
     }
 
     pub unsafe fn free_list_node(&self) -> &FreeListNode {
@@ -296,7 +299,7 @@ impl Header<Region> {
         self.content_address()
     }
 
-    pub unsafe fn first_block_mut(&self) -> &mut Header<Block> {
+    pub unsafe fn first_block_mut(&mut self) -> &mut Header<Block> {
         // There is *ALWAYS* at least one block in the region.
         &mut *self.data.blocks.head.unwrap().as_ptr()
     }
@@ -338,7 +341,7 @@ impl<T> LinkedList<T> {
     ///
     /// * `address` - Memory address where the new node will be written. Must
     /// be valid and non null.
-    pub unsafe fn append(&mut self, data: T, address: *mut u8) -> &mut Header<T> {
+    pub unsafe fn append(&mut self, data: T, address: *mut u8) -> NonNull<Header<T>> {
         let node = address as *mut Node<T>;
 
         *node = Node {
@@ -358,7 +361,7 @@ impl<T> LinkedList<T> {
         self.tail = link;
         self.len += 1;
 
-        &mut *node
+        NonNull::new_unchecked(node)
     }
 
     pub unsafe fn insert_after(
@@ -366,7 +369,7 @@ impl<T> LinkedList<T> {
         node: &mut Node<T>,
         data: T,
         address: *mut u8,
-    ) -> &mut Header<T> {
+    ) -> NonNull<Header<T>> {
         let next = address as *mut Node<T>;
 
         *next = Node {
@@ -381,7 +384,7 @@ impl<T> LinkedList<T> {
             self.tail = node.next;
         }
 
-        &mut *next
+        NonNull::new_unchecked(next)
     }
 
     pub unsafe fn remove(&mut self, node: &Node<T>) {
@@ -389,14 +392,14 @@ impl<T> LinkedList<T> {
             self.head = None;
             self.tail = None;
         } else if node as *const Node<T> == self.head.unwrap().as_ptr() {
-            (*(*node).next.unwrap().as_ptr()).prev = None;
-            self.head = (*node).next;
+            (*node.next.unwrap().as_ptr()).prev = None;
+            self.head = node.next;
         } else if node as *const Node<T> == self.tail.unwrap().as_ptr() {
-            (*(*node).prev.unwrap().as_ptr()).next = None;
-            self.tail = (*node).prev;
+            (*node.prev.unwrap().as_ptr()).next = None;
+            self.tail = node.prev;
         } else {
-            let next = &mut *(*node).next.unwrap().as_ptr();
-            let prev = &mut *(*node).prev.unwrap().as_ptr();
+            let next = &mut *node.next.unwrap().as_ptr();
+            let prev = &mut *node.prev.unwrap().as_ptr();
             prev.next = next.next;
             next.prev = prev.prev;
         }
@@ -405,7 +408,7 @@ impl<T> LinkedList<T> {
     }
 }
 
-impl LinkedList<()> {
+impl FreeList {
     pub unsafe fn append_block(&mut self, block: &Header<Block>) {
         self.append((), block.content_address());
     }
@@ -420,14 +423,14 @@ impl MmapAllocator {
     // is requested using [`MmapAllocator::alloc`].
     pub fn new() -> Self {
         Self {
-            free_blocks: LinkedList::new(),
+            free_blocks: FreeList::new(),
             regions: LinkedList::new(),
         }
     }
 
     /// Allocates a new block that can fit at least `layout.size()` bytes.
     /// Because of alignment and headers, it might allocate a bigger block than
-    /// needed. As long as no more than `layout.size()` bytes are written on
+    /// needed. As long as no more than `layout.align()` bytes are written on
     /// the content part of the block it should be fine.
     pub unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
         let size = align(if layout.size() >= MIN_BLOCK_SIZE {
@@ -437,12 +440,12 @@ impl MmapAllocator {
         });
 
         let free_block = match self.find_free_block(size) {
-            Some(block) => block,
+            Some(mut block) => block.as_mut(),
             None => {
-                let Some(region) = self.request_region(size) else {
+                let Some(mut region) = self.request_region(size) else {
                     return ptr::null_mut();
                 };
-                region.first_block_mut()
+                region.as_mut().first_block_mut()
             }
         };
 
@@ -463,7 +466,7 @@ impl MmapAllocator {
         // If left block is merged then the address will change.
         block = self.merge_free_blocks_if_possible(&mut *block);
 
-        let region = *(*block).region();
+        let region = (*block).region();
 
         // All blocks have been merged into one, so we can return this region
         // back to the kernel.
@@ -472,7 +475,7 @@ impl MmapAllocator {
             // region is about to be unmapped.
             self.free_blocks.remove_block(&*block);
             // Region has to be removed before unmapping, otherwise seg fault.
-            self.regions.remove(&*(*block).region());
+            self.regions.remove(&region);
             let length = region.total_size() as libc::size_t;
             if libc::munmap(address as *mut libc::c_void, length) != 0 {
                 // TODO: What should we do here? Panic? Memory region is still
@@ -523,7 +526,7 @@ impl MmapAllocator {
         // equal to length. That's okay because the region would have only one
         // block that doesn't waste any space and the entire region would be
         // returned back to the kernel when the block is deallocated.
-        if total_size < length && total_size + mem::size_of::<Block>() + MIN_BLOCK_SIZE > length {
+        if total_size < length && total_size + BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE > length {
             length += page_size();
         }
 
@@ -536,7 +539,7 @@ impl MmapAllocator {
     ///
     /// * `length` - Length that we should call `mmap` with. This should be a
     /// multiple of [`PAGE_SIZE`].
-    unsafe fn mmap(&self, length: usize) -> Option<NonNull<u8>> {
+    unsafe fn mmap(&self, length: usize) -> Pointer<u8> {
         // C void null pointer. This is what we need to request memory with mmap.
         let null = ptr::null_mut::<libc::c_void>();
         // Memory protection. Read-Write only.
@@ -558,44 +561,47 @@ impl MmapAllocator {
     ///
     /// * `size` - The number of bytes (must be aligned to word size) that
     /// need to be allocated without including any headers.
-    unsafe fn request_region(&mut self, size: usize) -> Option<&mut Header<Region>> {
+    unsafe fn request_region(&mut self, size: usize) -> Pointer<Header<Region>> {
         let length = self.determine_region_length(size);
-        let Some(address) = self.mmap(length) else { return None };
 
-        let region = self.regions.append(
+        let Some(address) = self.mmap(length) else {
+            return None;
+        };
+
+        let mut region = self.regions.append(
             Region {
                 blocks: LinkedList::new(),
-                size: length,
+                size: length - REGION_HEADER_SIZE,
             },
             address.as_ptr(),
         );
 
-        let block = region.data.blocks.append(
+        let block = region.as_mut().data.blocks.append(
             Block {
-                size: region.size() - BLOCK_HEADER_SIZE,
+                size: region.as_ref().size() - BLOCK_HEADER_SIZE,
                 is_free: true,
-                region: NonNull::new_unchecked(region),
+                region: NonNull::new_unchecked(address.as_ptr() as *mut Header<Region>),
             },
-            region.first_block_address(),
+            region.as_ref().first_block_address(),
         );
 
-        self.free_blocks.append_block(block);
+        self.free_blocks.append_block(&*block.as_ptr());
 
         Some(region)
     }
 
     /// Returns the first free block in the free list or null if none was found.
-    unsafe fn find_free_block(&self, size: usize) -> Option<&mut Header<Block>> {
+    unsafe fn find_free_block(&self, size: usize) -> Pointer<Header<Block>> {
         let mut current = self.free_blocks.head;
 
         while let Some(node) = current {
             let block = Header::<Block>::from_free_list_node(node.as_ptr());
 
-            if (*block).data.size >= size {
-                return Some(&mut *block);
+            if block.as_ref().data.size >= size {
+                return Some(block);
             }
 
-            current = (*node.as_ptr()).next;
+            current = node.as_ref().next;
         }
 
         None
@@ -636,7 +642,7 @@ impl MmapAllocator {
         // If we can, the block is located `size` bytes after the initial
         // content address of the current block.
         let address = block.content_address().add(size);
-        let region = &mut *block.data.region.as_ptr();
+        let region = block.data.region.as_mut();
         let new_block = Block {
             size: block.data.size - size - BLOCK_HEADER_SIZE,
             is_free: true,
@@ -647,7 +653,7 @@ impl MmapAllocator {
         let new_block = region.data.blocks.insert_after(block, new_block, address);
 
         // Append new block to free list.
-        self.free_blocks.append_block(new_block);
+        self.free_blocks.append_block(new_block.as_ref());
 
         // The current block can only hold `size` bytes from now on.
         block.data.size = size;
@@ -685,10 +691,10 @@ impl MmapAllocator {
     ///                         |     |  Content  | <- A + B + C bytes.
     ///                         +-->  +-----------+
     /// ```
-    unsafe fn merge_free_blocks_if_possible(
+    unsafe fn merge_free_blocks_if_possible<'a>(
         &mut self,
-        mut block: &mut Header<Block>,
-    ) -> &mut Header<Block> {
+        mut block: &'a mut Header<Block>,
+    ) -> &'a mut Header<Block> {
         if block.next.is_some() && (*block.next.unwrap().as_ptr()).is_free() {
             self.merge_next_block(block);
         }
@@ -721,7 +727,7 @@ impl MmapAllocator {
         // First update free list. The new bigger block will become the
         // last block, and the 2 old smaller blocks will "dissapear" from the
         // list.
-        let next = &mut *block.next.unwrap().as_ptr();
+        let next = block.next.unwrap().as_ref();
         self.free_blocks.remove_block(next);
         self.free_blocks.remove_block(block);
         self.free_blocks.append_block(block);
