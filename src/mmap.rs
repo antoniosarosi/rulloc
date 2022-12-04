@@ -1,14 +1,19 @@
-use std::{alloc::Layout, mem, ptr, ptr::NonNull};
+use std::{alloc::Layout, marker::PhantomData, mem, ptr, ptr::NonNull};
 
 use libc;
 
 use crate::align;
 
 /// Minimum block size in bytes. Read the documentation of the data structures
-/// used for this allocator to understand why it has this value.
+/// used for this allocator to understand why it has this value. Specifically,
+/// see [`Header<T>`], [`Block`], [`Region`], [`LinkedList<T>`] and especially
+/// [`FreeListNode`].
 const MIN_BLOCK_SIZE: usize = mem::size_of::<FreeListNode>();
 
+/// Block header size in bytes. See [`Header<T>`] and [`Block`].
 const BLOCK_HEADER_SIZE: usize = mem::size_of::<Header<Block>>();
+
+/// Region header size in bytes. See [`Header<T>`] and [`Region`].
 const REGION_HEADER_SIZE: usize = mem::size_of::<Header<Region>>();
 
 /// Virtual memory page size. 4096 bytes on most computers. This should be a
@@ -27,21 +32,229 @@ unsafe fn page_size() -> usize {
     PAGE_SIZE
 }
 
+/// Non-null pointer to `T`. We use this in most cases instead of `*mut T`
+/// because the compiler will yell at us if we don't write code for the `None`
+/// case. I think variance doesn't have much implications here except for
+/// [`LinkedList<T>`], but that should probably be covariant anyway.
 type Link<T> = Option<NonNull<T>>;
 
+/// Linked list node. See also [`Header<T>`].
 struct Node<T> {
     next: Link<Self>,
     prev: Link<Self>,
     data: T,
 }
 
+/// Since all the headers we store point to their previous and next header we
+/// might as well consider them linked list nodes. This is just a type alias
+/// that we use when we want to refer to a block or region header without
+/// thinking about linked list nodes.
 type Header<T> = Node<T>;
 
+/// Custom linked list implementation for this allocator. This struct was
+/// created as an abstraction to reduce duplicated code, isolate some unsafe
+/// parts and reduce raw pointer usage. It makes the code harder to follow, so
+/// if you want a simpler version without this abstraction check this commit:
+/// [`37b7752e2daa6707c93cd7badfa85c168f09aac8`](https://github.com/antoniosarosi/memalloc-rust/blob/37b7752e2daa6707c93cd7badfa85c168f09aac8/src/mmap.rs)
+struct LinkedList<T> {
+    head: Link<Node<T>>,
+    tail: Link<Node<T>>,
+    len: usize,
+    marker: PhantomData<T>,
+}
+
+/// Memory block specific data. All headers are also linked list nodes, see
+/// [`Header<T>`]. In this case, a complete block header would be `Node<Block>`,
+/// also known as `Header<Block>`. Here's a graphical representation of how it
+/// looks like in memory:
+///
+/// ```text
+/// +--------------------------+            <-----------------+
+/// | pointer to next block    |   <------+                   |
+/// +--------------------------+          | Link<Node<Block>> |
+/// | pointer to prev block    |   <------+                   |
+/// +--------------------------+                              |
+/// | pointer to block region  |   <------+                   |
+/// +--------------------------+          |                   | <Node<Block>>
+/// | block size               |          |                   |
+/// +--------------------------+          | Block             |
+/// | is free flag             |          |                   |
+/// +--------------------------+          |                   |
+/// | padding (word alignment) |   <------+                   |
+/// +--------------------------+            <-----------------+
+/// |      User content        |   <------+
+/// |           ...            |          |
+/// |           ...            |          | This is where the user writes stuff.
+/// |           ...            |          |
+/// |           ...            |   <------+
+/// +--------------------------+
+/// ```
+struct Block {
+    /// Memory region where this block is located.
+    region: NonNull<Header<Region>>,
+    /// Size of the block excluding `Header<Block>` size.
+    size: usize,
+    /// Whether this block can be used or not.
+    is_free: bool,
+}
+
+/// Memory region specific data. All headers are also linked lists nodes, see
+/// [`Header<T>`] and [`Block`]. In this case, a complete region header would be
+/// `Header<Region>`.
+///
+/// We use [`libc::mmap`] to request memory regions to the kernel, and we cannot
+/// assume that these regions are adjacent because `mmap` might be used outside
+/// of this allocator (and that's okay) or we unmapped a previously mapped
+/// region, which causes its next and previous regions to be non-adjacent.
+/// Therefore, we store regions in a linked list. Each region also contains a
+/// linked list of blocks. This is the high level overview:
+///
+/// ```text
+/// +--------+------------------------+      +--------+-------------------------------------+
+/// |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
+/// | Region | | Block | -> | Block | | ---> | Region | | Block | -> | Block | -> | Block | |
+/// |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
+/// +--------+------------------------+      ---------+-------------------------------------+
+/// ```
+struct Region {
+    /// Blocks contained within this memory region.
+    blocks: LinkedList<Block>,
+    /// Size of the region excluding `Header<Region>` size.
+    size: usize,
+}
+
+/// When a block is free we'll use the content of the block to store a free
+/// list, that is, a linked list of _only_ free blocks. Since we want a doubly
+/// linked list, we need to store 2 pointers, one for the previous block and
+/// another one for the next free block. This is how a free block would look
+/// like in memory:
+///
+/// ```text
+/// +----------------------------+
+/// | pointer to next block      | <--+
+/// +----------------------------+    |
+/// | pointer to prev block      |    |
+/// +----------------------------+    | Node<Block> struct.
+/// | rest of fields             |    |
+/// +----------------------------+    |
+/// |          ......            | <--+
+/// +----------------------------+
+/// | pointer to next free block | <--+
+/// +----------------------------+    | Node<()> struct.
+/// | pointer to prev free block | <--+
+/// +----------------------------+
+/// |     Rest of user data      | <--+
+/// |          ......            |    | Rest of content. This could be 0 bytes.
+/// |          ......            | <--+
+/// +----------------------------+
+/// ```
+///
+/// Free blocks could point to blocks located in different regions, since _all_
+/// free blocks are linked. See this representation:
+///
+/// ```text
+///                   Points to free block in next region       Points to same region
+///                +--------------------------------------+   +-----------------------+
+///                |                                      |   |                       |
+/// +--------+-----|------------------+      +--------+---|---|-----------------------|-----+
+/// |        | +---|---+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
+/// | Region | | Free  | -> | Block | | ---> | Region | | Free  | -> | Block | -> | Free  | |
+/// |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
+/// +--------+------------------------+      ---------+-------------------------------------+
+/// ```
+///
+/// However, there's a little catch. As you can see we use `Node<()>` to
+/// represent a node of the free list. That's because, first of all, we want to
+/// reuse the [`LinkedList<T>`] implementation. Secondly, there's no additional
+/// metadata associated to free blocks other than pointers to previous and next
+/// free blocks. All other data such as block size or region is located in the
+/// `Node<Block>` struct right above `Node<()>`, as you can see in the memory
+/// representation.
+///
+/// The [`Node<T>`] type stores the pointers we need plus some other data, so if
+/// we give it a zero sized `T` we can reuse it for the free list without
+/// declaring a new type or consuming additional memory. But this has some
+/// implications over simply storing `*mut Node<Block>` in the free block
+/// content space.
+///
+/// [`Node<T>`] can only point to instances of itself, so `Node<()>` can only
+/// point to `Node<()>`, otherwise [`LinkedList<T>`] implementation won't work
+/// for this type. Therefore, the free list doesn't contain pointers to the
+/// headers of free blocks, it contains pointers to the *content* of free
+/// blocks. If we want to obtain the actual block header given a `Node<()>`, we
+/// have to substract [`BLOCK_HEADER_SIZE`] to its address and cast to
+/// `Header<Block>` or `Node<Block>`.
+///
+/// It's not so intuitive because the free list should be `LinkedList<Block>`,
+/// but with this implementation it becomes `LinkedList<()>` instead. This,
+/// however, allows us to reuse [`LinkedList<T>`] without having to implement
+/// traits for different types of nodes to give us their next and previous or
+/// having to rely on macros to generate code for that. The only incovinience
+/// is that the free list points to content of free blocks instead of their
+/// header, but we can easily obtain the actual header.
+///
+/// I suggest that you check out the following commit, which doesn't have
+/// [`LinkedList<T>`], to understand why this method reduces boilerplate:
+/// [`37b7752e2daa6707c93cd7badfa85c168f09aac8`](https://github.com/antoniosarosi/memalloc-rust/blob/37b7752e2daa6707c93cd7badfa85c168f09aac8/src/mmap.rs#L649-L687)
+type FreeListNode = Node<()>;
+
+/// General purpose allocator. All memory is requested from the kernel using
+/// [`libc::mmap`] and some tricks and optimizations are implemented such as
+/// free list, block coalescing and block splitting.
+pub struct MmapAllocator {
+    /// Free list.
+    free_blocks: LinkedList<()>,
+    /// First region that we've allocated with `mmap`.
+    regions: LinkedList<Region>,
+}
+
 impl<T> Header<T> {
+    /// Returns a pointer to a [`Header<T>`] given an address that points right
+    /// after a valid [`Header<T>`].
+    ///
+    /// ```text
+    /// +-------------+
+    /// |  Header<T>  | <- Returned address points here.
+    /// +-------------+
+    /// |   Content   | <- Given address should point here.
+    /// +-------------+
+    /// |     ...     |
+    /// +-------------+
+    /// |     ...     |
+    /// +-------------+
+    /// ```
+    ///
+    /// # Safety
+    ///
+    /// Caller must guarantee that the given address points exactly to the first
+    /// memory cell after a [`Header<T>`]. This function will be mostly used for
+    /// deallocating memory, so the allocator user should give us an address
+    /// that we previously provided when allocating. As long as that's true,
+    /// this is safe, otherwise it's undefined behaviour.
     pub unsafe fn from_content_address(address: *mut u8) -> *mut Self {
         address.sub(mem::size_of::<Self>()) as *mut Self
     }
 
+    /// Returns the address after the header.
+    ///
+    /// ```text
+    /// +---------+
+    /// | Header  | <- Header<T> struct.
+    /// +---------+
+    /// | Content | <- Returned address points to the first cell after header.
+    /// +---------+
+    /// |   ...   |
+    /// +---------+
+    /// |   ...   |
+    /// +---------+
+    /// ```
+    ///
+    /// # Safety
+    ///
+    /// If `self` is a valid [`Header<T>`], the offset will return an address
+    /// that points right after `self`. That address is safe to use as long as
+    /// no more than `size` bytes are written, where `size` is a field of
+    /// [`Block`] or [`Region`].
     pub unsafe fn content_address(&self) -> *mut u8 {
         (self as *const Self).offset(1) as *mut u8
     }
@@ -101,21 +314,13 @@ impl Header<Region> {
     }
 }
 
-/// Custom linked list implementation for this allocator.
-struct LinkedList<T> {
-    head: Link<Node<T>>,
-    tail: Link<Node<T>>,
-    len: usize,
-    marker: std::marker::PhantomData<T>,
-}
-
 impl<T> LinkedList<T> {
     pub fn new() -> Self {
         Self {
             head: None,
             tail: None,
             len: 0,
-            marker: std::marker::PhantomData,
+            marker: PhantomData,
         }
     }
 
@@ -208,100 +413,6 @@ impl LinkedList<()> {
     pub unsafe fn remove_block(&mut self, block: &Header<Block>) {
         self.remove(block.free_list_node());
     }
-}
-
-/// Memory block header. Here's a graphical representation of how it looks like
-/// in memory:
-///
-/// ```text
-/// +--------------------------+
-/// | pointer to block region  |   <------+
-/// +--------------------------+          |
-/// | pointer to next block    |          |
-/// +--------------------------+          |
-/// | pointer to prev block    |          |
-/// +--------------------------+          | Block struct (This is the header).
-/// | block size               |          |
-/// +--------------------------+          |
-/// | is free flag             |          |
-/// +--------------------------+          |
-/// | padding (word alignment) |   <------+
-/// +--------------------------+
-/// |      User content        |   <------+
-/// |           ...            |          |
-/// |           ...            |          | This is where the user writes stuff.
-/// |           ...            |          |
-/// |           ...            |   <------+
-/// +--------------------------+
-/// ```
-struct Block {
-    /// Memory region where this block is located.
-    region: NonNull<Header<Region>>,
-    /// Size of the block excluding size of header.
-    size: usize,
-    /// Whether this block can be used or not.
-    is_free: bool,
-}
-
-/// Memory region header. `mmap` gives us memory regions that are not
-/// necessarily one after the other, so they don't follow a particular order. We
-/// store them as a linked list, and each region contains a list of blocks
-/// within itself.
-///
-/// ```text
-/// +--------+------------------------+      +--------+-------------------------------------+
-/// |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
-/// | Region | | Block | -> | Block | | ---> | Region | | Block | -> | Block | -> | Block | |
-/// |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
-/// +--------+------------------------+      ---------+-------------------------------------+
-/// ```
-struct Region {
-    blocks: LinkedList<Block>,
-    size: usize,
-}
-
-type FreeListNode = Node<()>;
-
-/// When a block is free we'll use the content to store a free list, that is, a
-/// linked list of _only_ free blocks. Since we want a doubly linked list, we
-/// need to store 2 pointers, one for the previous block and another one for
-/// the next free block. This is how a free block would look like in memory:
-///
-/// ```text
-/// +----------------------------+ <- Block struct starts here.
-/// |   Header (Block struct)    |
-/// +----------------------------+ <- FreeBlockLinks struct starts here.
-/// | pointer to next free block |
-/// +----------------------------+
-/// | pointer to prev free block |
-/// +----------------------------+ <- FreeBlockLinks struct ends here.
-/// |   Rest of user content     | <- This could be 0 bytes.
-/// |          ......            |
-/// +----------------------------+
-/// ```
-///
-/// Free blocks could point to blocks located in different regions, since _all_
-/// free blocks are linked. See this representation:
-///
-/// ```text
-///                   Points to free block in next region       Points to same region
-///                +--------------------------------------+   +-----------------------+
-///                |                                      |   |                       |
-/// +--------+-----|------------------+      +--------+---|---|-----------------------|-----+
-/// |        | +---|---+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
-/// | Region | | Free  | -> | Block | | ---> | Region | | Free  | -> | Block | -> | Free  | |
-/// |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
-/// +--------+------------------------+      ---------+-------------------------------------+
-/// ```
-
-/// General   purpose allocator. All memory is requested from the kernel using
-/// `mmap` and some tricks and optimizations are implemented such as free list,
-/// block coalescing and block splitting.
-pub struct MmapAllocator {
-    /// Free list.
-    free_blocks: LinkedList<()>,
-    /// First region that we've allocated with `mmap`.
-    regions: LinkedList<Region>,
 }
 
 impl MmapAllocator {
