@@ -206,7 +206,7 @@ type FreeList = LinkedList<()>;
 /// free list, block coalescing and block splitting.
 pub struct MmapAllocator {
     /// Free list.
-    free_blocks: LinkedList<()>,
+    free_blocks: FreeList,
     /// First region that we've allocated with `mmap`.
     regions: LinkedList<Region>,
 }
@@ -234,8 +234,8 @@ impl<T> Header<T> {
     /// deallocating memory, so the allocator user should give us an address
     /// that we previously provided when allocating. As long as that's true,
     /// this is safe, otherwise it's undefined behaviour.
-    pub unsafe fn from_content_address(address: *mut u8) -> NonNull<Self> {
-        NonNull::new_unchecked(address.sub(mem::size_of::<Self>()) as *mut Self)
+    pub unsafe fn from_content_address(address: NonNull<u8>) -> NonNull<Self> {
+        NonNull::new_unchecked(address.as_ptr().sub(mem::size_of::<Self>()) as *mut Self)
     }
 
     /// Returns the address after the header.
@@ -258,24 +258,14 @@ impl<T> Header<T> {
     /// that points right after `self`. That address is safe to use as long as
     /// no more than `size` bytes are written, where `size` is a field of
     /// [`Block`] or [`Region`].
-    pub unsafe fn content_address(&self) -> *mut u8 {
-        (self as *const Self).offset(1) as *mut u8
+    pub unsafe fn content_address(header: NonNull<Self>) -> *mut u8 {
+        header.as_ptr().offset(1) as *mut u8
     }
 }
 
 impl Header<Block> {
-    pub unsafe fn from_free_list_node(links: *mut FreeListNode) -> NonNull<Self> {
-        Self::from_content_address(links as *mut u8)
-    }
-
-    pub unsafe fn free_list_node(&self) -> &FreeListNode {
-        let links = self.content_address() as *mut FreeListNode;
-        let c = self.content_address();
-        &*links
-    }
-
-    pub unsafe fn region(&self) -> &Header<Region> {
-        &*self.data.region.as_ptr()
+    pub unsafe fn from_free_list_node(links: NonNull<FreeListNode>) -> NonNull<Self> {
+        Self::from_content_address(NonNull::new_unchecked(links.as_ptr() as *mut u8))
     }
 
     pub unsafe fn region_mut(&mut self) -> &mut Header<Region> {
@@ -296,17 +286,8 @@ impl Header<Block> {
 }
 
 impl Header<Region> {
-    pub unsafe fn first_block_address(&self) -> *mut u8 {
-        self.content_address()
-    }
-
-    pub unsafe fn first_block(&self) -> &Header<Block> {
-        self.data.blocks.head.unwrap().as_ref()
-    }
-
-    pub unsafe fn first_block_mut(&mut self) -> &mut Header<Block> {
-        // There is *ALWAYS* at least one block in the region.
-        self.data.blocks.head.unwrap().as_mut()
+    pub unsafe fn first_block(&self) -> NonNull<Header<Block>> {
+        self.data.blocks.head.unwrap()
     }
 
     pub fn size(&self) -> usize {
@@ -371,22 +352,22 @@ impl<T> LinkedList<T> {
 
     pub unsafe fn insert_after(
         &mut self,
-        node: &mut Node<T>,
+        mut node: NonNull<Node<T>>,
         data: T,
         address: *mut u8,
     ) -> NonNull<Header<T>> {
         let next = address as *mut Node<T>;
 
         *next = Node {
-            prev: Some(NonNull::new_unchecked(node as *mut Node<T>)),
-            next: node.next,
+            prev: Some(node),
+            next: node.as_ref().next,
             data,
         };
 
-        node.next = Some(NonNull::new_unchecked(next));
+        node.as_mut().next = Some(NonNull::new_unchecked(next));
 
-        if node as *mut Node<T> == self.tail.unwrap().as_ptr() {
-            self.tail = node.next;
+        if node.as_ptr() == self.tail.unwrap().as_ptr() {
+            self.tail = node.as_ref().next;
         }
 
         self.len += 1;
@@ -394,19 +375,19 @@ impl<T> LinkedList<T> {
         NonNull::new_unchecked(next)
     }
 
-    pub unsafe fn remove(&mut self, node: &Node<T>) {
+    pub unsafe fn remove(&mut self, mut node: NonNull<Node<T>>) {
         if self.len == 1 {
             self.head = None;
             self.tail = None;
-        } else if node as *const Node<T> == self.head.unwrap().as_ptr() {
-            node.next.unwrap().as_mut().prev = None;
-            self.head = node.next;
-        } else if node as *const Node<T> == self.tail.unwrap().as_ptr() {
-            node.prev.unwrap().as_mut().next = None;
-            self.tail = node.prev;
+        } else if node == self.head.unwrap() {
+            node.as_mut().next.unwrap().as_mut().prev = None;
+            self.head = node.as_ref().next;
+        } else if node == self.tail.unwrap() {
+            node.as_mut().prev.unwrap().as_mut().next = None;
+            self.tail = node.as_ref().prev;
         } else {
-            let mut next = node.next.unwrap();
-            let mut prev = node.prev.unwrap();
+            let mut next = node.as_ref().next.unwrap();
+            let mut prev = node.as_ref().prev.unwrap();
             prev.as_mut().next = Some(next);
             next.as_mut().prev = Some(prev);
         }
@@ -416,19 +397,21 @@ impl<T> LinkedList<T> {
 }
 
 impl FreeList {
-    pub unsafe fn append_block(&mut self, block: &mut Header<Block>) {
-        self.append((), block.content_address());
-        block.data.is_free = true;
+    pub unsafe fn append_block(&mut self, mut block: NonNull<Header<Block>>) {
+        self.append((), block.as_ptr().offset(1) as *mut u8);
+        block.as_mut().data.is_free = true;
     }
 
-    pub unsafe fn remove_block(&mut self, block: &mut Header<Block>) {
-        self.remove(block.free_list_node());
-        block.data.is_free = false;
+    pub unsafe fn remove_block(&mut self, mut block: NonNull<Header<Block>>) {
+        self.remove(NonNull::new_unchecked(
+            (block.as_ptr() as *mut Header<Block>).offset(1) as *mut Node<()>,
+        ));
+        block.as_mut().data.is_free = false;
     }
 
     pub unsafe fn first_block(&self) -> Option<&Header<Block>> {
         self.head.and_then(|head| {
-            let block = Header::<Block>::from_free_list_node(head.as_ptr());
+            let block = Header::<Block>::from_free_list_node(head);
             Some(block.as_ref())
         })
     }
@@ -456,47 +439,44 @@ impl MmapAllocator {
         });
 
         let free_block = match self.find_free_block(size) {
-            Some(mut block) => block.as_mut(),
+            Some(block) => block,
             None => {
                 let Some(mut region) = self.request_region(size) else {
                     return ptr::null_mut();
                 };
-                region.as_mut().first_block_mut()
+                region.as_mut().first_block()
             }
         };
 
         self.split_free_block_if_possible(free_block, size);
         self.free_blocks.remove_block(free_block);
 
-        free_block.content_address()
+        free_block.as_ptr().offset(1) as *mut u8
     }
 
     /// Deallocates the given pointer. Memory might not be returned to the OS
     /// if the region where `address` is located still contains used blocks.
     /// However, the freed block will be reused later if possible.
     pub unsafe fn dealloc(&mut self, address: *mut u8) {
-        let mut block = Header::<Block>::from_content_address(address).as_mut();
+        let mut block = Header::<Block>::from_content_address(NonNull::new_unchecked(address));
 
         self.free_blocks.append_block(block);
 
         // If left block is merged then the address will change.
         block = self.merge_free_blocks_if_possible(block);
 
-        let region = block.data.region.as_ref();
+        let region = block.as_ref().data.region;
 
         // All blocks have been merged into one, so we can return this region
         // back to the kernel.
-        if region.num_blocks() == 1 {
+        if region.as_ref().num_blocks() == 1 {
             // The free block in this region is no longer valid because this
             // region is about to be unmapped.
             self.free_blocks.remove_block(block);
             // Region has to be removed before unmapping, otherwise seg fault.
-            self.regions.remove(&region);
-            let length = region.total_size() as libc::size_t;
-            if libc::munmap(address as *mut libc::c_void, length) != 0 {
-                // TODO: What should we do here? Panic? Memory region is still
-                // valid here, it wasn't unmapped.
-            }
+            self.regions.remove(region);
+            let length = region.as_ref().total_size() as libc::size_t;
+            self.unmap(region.as_ptr() as *mut u8, length);
         }
     }
 
@@ -556,6 +536,16 @@ impl MmapAllocator {
     /// * `length` - Length that we should call `mmap` with. This should be a
     /// multiple of [`PAGE_SIZE`].
     unsafe fn mmap(&self, length: usize) -> Pointer<u8> {
+        // Simulate mmap call if we are using Miri.
+        if cfg!(miri) {
+            let layout = Layout::array::<u8>(length)
+                .unwrap()
+                .align_to(mem::size_of::<usize>());
+            let address = std::alloc::alloc(layout.unwrap());
+
+            return Some(NonNull::new_unchecked(address));
+        }
+
         // C void null pointer. This is what we need to request memory with mmap.
         let null = ptr::null_mut::<libc::c_void>();
         // Memory protection. Read-Write only.
@@ -567,6 +557,20 @@ impl MmapAllocator {
         match libc::mmap(null, length, protection, flags, -1, 0) {
             libc::MAP_FAILED => None,
             address => Some(NonNull::new_unchecked(address as *mut u8)),
+        }
+    }
+
+    unsafe fn unmap(&self, address: *mut u8, length: usize) {
+        if cfg!(miri) {
+            let layout = Layout::array::<u8>(length)
+                .unwrap()
+                .align_to(mem::size_of::<usize>());
+            std::alloc::dealloc(address, layout.unwrap());
+        } else {
+            if libc::munmap(address as *mut libc::c_void, length) != 0 {
+                // TODO: What should we do here? Panic? Memory region is still
+                // valid here, it wasn't unmapped.
+            }
         }
     }
 
@@ -592,16 +596,16 @@ impl MmapAllocator {
             address.as_ptr(),
         );
 
-        let mut block = region.as_mut().data.blocks.append(
+        let block = region.as_mut().data.blocks.append(
             Block {
                 size: region.as_ref().size() - BLOCK_HEADER_SIZE,
                 is_free: true,
                 region: NonNull::new_unchecked(address.as_ptr() as *mut Header<Region>),
             },
-            region.as_ref().first_block_address(),
+            address.as_ptr().add(REGION_HEADER_SIZE),
         );
 
-        self.free_blocks.append_block(block.as_mut());
+        self.free_blocks.append_block(block);
 
         Some(region)
     }
@@ -611,7 +615,7 @@ impl MmapAllocator {
         let mut current = self.free_blocks.head;
 
         while let Some(node) = current {
-            let block = Header::<Block>::from_free_list_node(node.as_ptr());
+            let block = Header::<Block>::from_free_list_node(node);
 
             if block.as_ref().data.size >= size {
                 return Some(block);
@@ -649,30 +653,38 @@ impl MmapAllocator {
     ///         |     |  Content  | <- 64 bytes - 8 bytes - H bytes.
     ///         +-->  +-----------+
     /// ```
-    unsafe fn split_free_block_if_possible(&mut self, block: &mut Header<Block>, size: usize) {
+    unsafe fn split_free_block_if_possible(
+        &mut self,
+        mut block: NonNull<Header<Block>>,
+        size: usize,
+    ) {
         // If there's not enough space available we can't split the block.
-        if block.size() < size + BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE {
+        if block.as_ref().size() < size + BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE {
             return;
         }
 
         // If we can, the block is located `size` bytes after the initial
         // content address of the current block.
-        let address = block.content_address().add(size);
-        let region = block.data.region.as_mut();
+        let address = Header::<Block>::content_address(block).add(size);
+        let mut region = (*block.as_ptr()).data.region;
         let new_block = Block {
-            size: block.data.size - size - BLOCK_HEADER_SIZE,
+            size: block.as_ref().data.size - size - BLOCK_HEADER_SIZE,
             is_free: true,
-            region: NonNull::new_unchecked(region),
+            region,
         };
 
         // Append new block next to current block.
-        let mut new_block = region.data.blocks.insert_after(block, new_block, address);
+        let new_block = region
+            .as_mut()
+            .data
+            .blocks
+            .insert_after(block, new_block, address);
 
         // Append new block to free list.
-        self.free_blocks.append_block(new_block.as_mut());
+        self.free_blocks.append_block(new_block);
 
         // The current block can only hold `size` bytes from now on.
-        block.data.size = size;
+        block.as_mut().data.size = size;
     }
 
     /// This function performs the inverse of [`Self::split_free_block_if_possible`].
@@ -707,16 +719,16 @@ impl MmapAllocator {
     ///                         |     |  Content  | <- A + B + C bytes.
     ///                         +-->  +-----------+
     /// ```
-    unsafe fn merge_free_blocks_if_possible<'a>(
+    unsafe fn merge_free_blocks_if_possible(
         &mut self,
-        mut block: &'a mut Header<Block>,
-    ) -> &'a mut Header<Block> {
-        if block.next.is_some() && block.next.unwrap().as_ref().is_free() {
+        mut block: NonNull<Header<Block>>,
+    ) -> NonNull<Header<Block>> {
+        if block.as_ref().next.is_some() && block.as_ref().next.unwrap().as_ref().is_free() {
             self.merge_next_block(block);
         }
 
-        if block.prev.is_some() && block.prev.unwrap().as_ref().is_free() {
-            block = &mut (*block.prev.unwrap().as_ptr());
+        if block.as_ref().prev.is_some() && block.as_ref().prev.unwrap().as_ref().is_free() {
+            block = block.as_ref().prev.unwrap();
             self.merge_next_block(block);
         }
 
@@ -739,19 +751,19 @@ impl MmapAllocator {
     ///        +-----------------+
     ///           Merge B into A
     /// ```
-    unsafe fn merge_next_block(&mut self, block: &mut Header<Block>) {
+    unsafe fn merge_next_block(&mut self, mut block: NonNull<Header<Block>>) {
         // First update free list. The new bigger block will become the
         // last block, and the 2 old smaller blocks will "dissapear" from the
         // list.
-        let next = block.next.unwrap().as_mut();
+        let next = block.as_ref().next.unwrap();
         self.free_blocks.remove_block(next);
         self.free_blocks.remove_block(block);
         self.free_blocks.append_block(block);
 
         // Now this block is bigger.
-        block.data.size += next.total_size();
+        block.as_mut().data.size += next.as_ref().total_size();
 
-        block.region_mut().data.blocks.remove(next);
+        block.as_mut().region_mut().data.blocks.remove(next);
     }
 }
 
@@ -770,21 +782,21 @@ mod tests {
             *first_addr = 69;
 
             // First region should be PAGE_SIZE in length.
-            let first_region = allocator.regions.head.unwrap().as_ref();
-            assert_eq!(first_region.total_size(), PAGE_SIZE);
+            let first_region = allocator.regions.head.unwrap();
+            assert_eq!(first_region.as_ref().total_size(), PAGE_SIZE);
             assert_eq!(allocator.regions.len, 1);
 
-            let first_block = first_region.first_block();
+            let first_block = first_region.as_ref().first_block();
 
             // First block should be located after the region header.
             assert_eq!(
-                first_block as *const _ as usize - first_region as *const _ as *mut u8 as usize,
+                first_block.as_ptr() as usize - first_region.as_ptr() as *mut u8 as usize,
                 REGION_HEADER_SIZE
             );
 
             // Size of first block should be minimum size because we've
             // requested 1 byte only.
-            assert_eq!(first_block.size(), MIN_BLOCK_SIZE);
+            assert_eq!(first_block.as_ref().size(), MIN_BLOCK_SIZE);
 
             // First free block should be located after region header.
             assert_eq!(allocator.free_blocks.len, 1);
@@ -795,7 +807,7 @@ mod tests {
 
             // Region should have two blocks, we are using the first one and the
             // other one is free.
-            assert_eq!(first_region.num_blocks(), 2);
+            assert_eq!(first_region.as_ref().num_blocks(), 2);
 
             // The remaining free block should be split in two when allocating
             // less size than it can hold.
@@ -806,7 +818,7 @@ mod tests {
             }
 
             // There are 3 blocks now, last one is still free.
-            assert_eq!(first_region.num_blocks(), 3);
+            assert_eq!(first_region.as_ref().num_blocks(), 3);
             assert_eq!(allocator.free_blocks.len, 1);
 
             // Lets try to allocate the entire remaining free block.
@@ -823,7 +835,7 @@ mod tests {
 
             // Number of blocks hasn't changed, but we don't have free blocks
             // anymore.
-            assert_eq!(first_region.num_blocks(), 3);
+            assert_eq!(first_region.as_ref().num_blocks(), 3);
             assert_eq!(allocator.free_blocks.len, 0);
 
             // Time for checking memory corruption
@@ -839,16 +851,20 @@ mod tests {
             let fourth_alloc = PAGE_SIZE * 2 - PAGE_SIZE / 2;
             let fourth_addr = allocator.alloc(Layout::array::<u8>(fourth_alloc).unwrap());
 
+            for i in 0..fourth_alloc {
+                *(fourth_addr.add(i)) = 69;
+            }
+
             assert_eq!(allocator.regions.len, 2);
             assert_eq!(allocator.free_blocks.len, 1);
 
             // Let's play with dealloc now.
             allocator.dealloc(first_addr);
-            assert_eq!(first_region.num_blocks(), 3);
+            assert_eq!(first_region.as_ref().num_blocks(), 3);
             assert_eq!(allocator.free_blocks.len, 2);
 
             allocator.dealloc(third_addr);
-            assert_eq!(first_region.num_blocks(), 3);
+            assert_eq!(first_region.as_ref().num_blocks(), 3);
             assert_eq!(allocator.free_blocks.len, 3);
 
             // Now here comes the magic, if we deallocate second addr all blocks
