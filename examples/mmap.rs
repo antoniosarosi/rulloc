@@ -7,7 +7,6 @@ fn print_alloc(size: usize, addr: *mut u8, allocator: &MmapAllocator) {
     println!("Received this address: {addr:?}");
     println!("Allocator statistics:\n");
     unsafe {
-        allocator.print_stats();
     }
 }
 
