@@ -71,9 +71,9 @@ struct LinkedList<T> {
 }
 
 /// Memory block specific data. All headers are also linked list nodes, see
-/// [`Header<T>`]. In this case, a complete block header would be `Node<Block>`,
-/// also known as `Header<Block>`. Here's a graphical representation of how it
-/// looks like in memory:
+/// [`Header<T>`]. In this case, a complete block header would be
+/// [`Node<Block>`], also known as [`Header<Block>`]. Here's a graphical
+/// representation of how it looks like in memory:
 ///
 /// ```text
 /// +--------------------------+          <----------------------+
@@ -99,7 +99,7 @@ struct LinkedList<T> {
 struct Block {
     /// Memory region where this block is located.
     region: NonNull<Header<Region>>,
-    /// Size of the block excluding `Header<Block>` size.
+    /// Size of the block excluding [`Header<Block>`] size.
     size: usize,
     /// Whether this block can be used or not.
     is_free: bool,
@@ -107,14 +107,14 @@ struct Block {
 
 /// Memory region specific data. All headers are also linked lists nodes, see
 /// [`Header<T>`] and [`Block`]. In this case, a complete region header would be
-/// `Header<Region>`.
+/// [`Header<Region>`].
 ///
-/// We use [`libc::mmap`] to request memory regions to the kernel, and we cannot
-/// assume that these regions are adjacent because `mmap` might be used outside
-/// of this allocator (and that's okay) or we unmapped a previously mapped
-/// region, which causes its next and previous regions to be non-adjacent.
-/// Therefore, we store regions in a linked list. Each region also contains a
-/// linked list of blocks. This is the high level overview:
+/// We use [`libc::mmap`] to request memory regions from the kernel, and we
+/// cannot assume that these regions are adjacent because `mmap` might be used
+/// outside of this allocator (and that's okay) or we unmapped a previously
+/// mapped region, which causes its next and previous regions to be
+/// non-adjacent. Therefore, we store regions in a linked list. Each region also
+/// contains a linked list of blocks. This is the high level overview:
 ///
 /// ```text
 /// +--------+------------------------+      +--------+-------------------------------------+
@@ -126,7 +126,7 @@ struct Block {
 struct Region {
     /// Blocks contained within this memory region.
     blocks: LinkedList<Block>,
-    /// Size of the region excluding `Header<Region>` size.
+    /// Size of the region excluding [`Header<Region>`] size.
     size: usize,
 }
 
@@ -184,16 +184,16 @@ struct Region {
 /// implications over simply storing `*mut Node<Block>` in the free block
 /// content space.
 ///
-/// [`Node<T>`] can only point to instances of itself, so `Node<()>` can only
-/// point to `Node<()>`, otherwise [`LinkedList<T>`] implementation won't work
+/// [`Node<T>`] can only point to instances of itself, so [`Node<()>`] can only
+/// point to [`Node<()>`], otherwise [`LinkedList<T>`] implementation won't work
 /// for this type. Therefore, the free list doesn't contain pointers to the
 /// headers of free blocks, it contains pointers to the *content* of free
 /// blocks. If we want to obtain the actual block header given a `Node<()>`, we
 /// have to substract [`BLOCK_HEADER_SIZE`] to its address and cast to
-/// `Header<Block>` or `Node<Block>`.
+/// [`Header<Block>`] or [`Node<Block>`].
 ///
-/// It's not so intuitive because the free list should be `LinkedList<Block>`,
-/// but with this implementation it becomes `LinkedList<()>` instead. This,
+/// It's not so intuitive because the free list should be [`LinkedList<Block>`],
+/// but with this implementation it becomes [`LinkedList<()>`] instead. This,
 /// however, allows us to reuse [`LinkedList<T>`] without having to implement
 /// traits for different types of nodes to give us their next and previous or
 /// having to rely on macros to generate code for that. The only incovinience
@@ -261,7 +261,7 @@ impl<T> Header<T> {
     ///
     /// # Safety
     ///
-    /// If `header` is a valid `NonNull<Header<T>>`, the offset will return an
+    /// If `header` is a valid [`NonNull<Header<T>>`], the offset will return an
     /// address that points right after the header. That address is safe to use
     /// as long as no more than `size` bytes are written, where `size` is a
     /// field of [`Block`] or [`Region`].
@@ -287,7 +287,7 @@ impl Header<Block> {
     /// is only unsafe if the allocator user writes to an address that was
     /// previously deallocated (use after free).
     pub unsafe fn from_free_list_node(links: NonNull<FreeListNode>) -> NonNull<Self> {
-        Self::from_content_address(NonNull::new_unchecked(links.as_ptr() as *mut u8))
+        Self::from_content_address(links.cast())
     }
 
     /// Returns a mutable reference to the region that contains this block.
@@ -503,9 +503,10 @@ impl MmapAllocator {
         self.split_free_block_if_possible(free_block, size);
         self.free_blocks.remove_block(free_block);
 
-        let h = Header::content_address_of(free_block);
-
-        Ok(NonNull::new_unchecked(ptr::slice_from_raw_parts_mut(h.as_ptr(), free_block.as_ref().size())))
+        Ok(NonNull::new_unchecked(ptr::slice_from_raw_parts_mut(
+            Header::content_address_of(free_block).as_ptr(),
+            free_block.as_ref().size(),
+        )))
     }
 
     /// Deallocates the given pointer. Memory might not be returned to the OS
@@ -782,23 +783,16 @@ impl MmapAllocator {
     ///                         |     |  Content  | <- A + B + C + 2H bytes.
     ///                         +-->  +-----------+
     /// ```
+    #[rustfmt::skip]
     unsafe fn merge_free_blocks_if_possible(
         &mut self,
         mut block: NonNull<Header<Block>>,
     ) -> NonNull<Header<Block>> {
-        if block
-            .as_ref()
-            .next
-            .is_some_and(|next| next.as_ref().is_free())
-        {
+        if block.as_ref().next.is_some_and(|next| next.as_ref().is_free()) {
             self.merge_next_block(block);
         }
 
-        if block
-            .as_ref()
-            .prev
-            .is_some_and(|prev| prev.as_ref().is_free())
-        {
+        if block.as_ref().prev.is_some_and(|prev| prev.as_ref().is_free()) {
             block = block.as_ref().prev.unwrap();
             self.merge_next_block(block);
         }
@@ -840,7 +834,7 @@ impl MmapAllocator {
     }
 }
 
-struct Wrapper {
+pub struct Wrapper {
     allocator: UnsafeCell<MmapAllocator>,
 }
 
@@ -872,9 +866,11 @@ mod tests {
             let mut allocator = MmapAllocator::new();
 
             // Request 1 byte, should call `mmap` with length of PAGE_SIZE.
-            let first_addr = allocator.allocate(Layout::new::<u8>()).unwrap().cast::<u8>().as_ptr();
+            let first_layout = Layout::new::<u8>();
+            let first_addr = allocator.allocate(first_layout).unwrap().cast::<u8>();
+
             // We'll use this later to check memory corruption.
-            *first_addr = 69;
+            *first_addr.as_ptr() = 69;
 
             // First region should be PAGE_SIZE in length.
             let first_region = allocator.regions.head.unwrap();
@@ -907,11 +903,12 @@ mod tests {
 
             // The remaining free block should be split in two when allocating
             // less size than it can hold.
-            let second_addr = allocator.allocate(Layout::array::<u8>(PAGE_SIZE / 2).unwrap()).unwrap().cast::<u8>().as_ptr();
+            let second_layout = Layout::array::<u8>(PAGE_SIZE / 2).unwrap();
+            let second_addr = allocator.allocate(second_layout).unwrap().cast::<u8>();
 
             // We'll check corruption later.
-            for i in 0..(PAGE_SIZE / 2) {
-                *second_addr = 69;
+            for _ in 0..second_layout.size() {
+                *second_addr.as_ptr() = 69;
             }
 
             // There are 3 blocks now, last one is still free.
@@ -919,15 +916,16 @@ mod tests {
             assert_eq!(allocator.free_blocks.len, 1);
 
             // Lets try to allocate the entire remaining free block.
-            let third_alloc = PAGE_SIZE
+            let remaining_size = PAGE_SIZE
                 - REGION_HEADER_SIZE
                 - (BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE) // First Alloc
                 - (BLOCK_HEADER_SIZE + PAGE_SIZE / 2) // Second Alloc
                 - BLOCK_HEADER_SIZE;
-            let third_addr = allocator.allocate(Layout::array::<u8>(third_alloc).unwrap()).unwrap().cast::<u8>().as_ptr();
+            let third_layout = Layout::array::<u8>(remaining_size).unwrap();
+            let third_addr = allocator.allocate(third_layout).unwrap().cast::<u8>();
 
-            for i in 0..third_alloc {
-                *third_addr = 69;
+            for _ in 0..third_layout.size() {
+                *third_addr.as_ptr() = 69;
             }
 
             // Number of blocks hasn't changed, but we don't have free blocks
@@ -936,20 +934,20 @@ mod tests {
             assert_eq!(allocator.free_blocks.len, 0);
 
             // Time for checking memory corruption
-            assert_eq!(*first_addr, 69);
-            for i in 0..(PAGE_SIZE / 2) {
-                assert_eq!(*second_addr, 69);
+            assert_eq!(*first_addr.as_ptr(), 69);
+            for _ in 0..second_layout.size() {
+                assert_eq!(*second_addr.as_ptr(), 69);
             }
-            for i in 0..third_alloc {
-                assert_eq!(*third_addr, 69);
+            for _ in 0..third_layout.size() {
+                assert_eq!(*third_addr.as_ptr(), 69);
             }
 
             // Let's request a bigger chunk so that a new region is used.
-            let fourth_alloc = PAGE_SIZE * 2 - PAGE_SIZE / 2;
-            let fourth_addr = allocator.allocate(Layout::array::<u8>(fourth_alloc).unwrap()).unwrap().cast::<u8>().as_ptr();
+            let fourth_layout = Layout::array::<u8>(PAGE_SIZE * 2 - PAGE_SIZE / 2).unwrap();
+            let fourth_addr = allocator.allocate(fourth_layout).unwrap().cast::<u8>();
 
-            for i in 0..fourth_alloc {
-                *fourth_addr = 69;
+            for _ in 0..fourth_layout.size() {
+                *fourth_addr.as_ptr() = 69;
             }
 
             // We should have a new region and a new free block now.
@@ -957,7 +955,7 @@ mod tests {
             assert_eq!(allocator.free_blocks.len, 1);
 
             // Let's play with dealloc.
-            allocator.deallocate(NonNull::new_unchecked(first_addr), Layout::new::<u8>());
+            allocator.deallocate(first_addr, first_layout);
 
             // After deallocating the first block, we should have a new free
             // block but the number of blocks in the region shouldn't change
@@ -965,7 +963,7 @@ mod tests {
             assert_eq!(first_region.as_ref().num_blocks(), 3);
             assert_eq!(allocator.free_blocks.len, 2);
 
-            allocator.deallocate(NonNull::new_unchecked(third_addr), Layout::new::<u8>());
+            allocator.deallocate(third_addr, third_layout);
 
             // Again, after deallocating the third block we should have a new
             // free block but the number of block in the region doesn't change.
@@ -975,14 +973,49 @@ mod tests {
             // Now here comes the magic, if we deallocate second addr all blocks
             // in region one should be merged and region should be returned to
             // the kernel.
-            allocator.deallocate(NonNull::new_unchecked(second_addr), Layout::new::<u8>());
+            allocator.deallocate(second_addr, second_layout);
             assert_eq!(allocator.regions.len, 1);
             assert_eq!(allocator.free_blocks.len, 1);
 
-            // Same with deallocating fourth alloc
-            allocator.deallocate(NonNull::new_unchecked(fourth_addr), Layout::new::<u8>());
+            // Check mem corruption in the last block
+            for _ in 0..fourth_layout.size() {
+                assert_eq!(*fourth_addr.as_ptr(), 69);
+            }
+
+            // Deallocating fourh address should unmap the last region.
+            allocator.deallocate(fourth_addr, fourth_layout);
             assert_eq!(allocator.regions.len, 0);
             assert_eq!(allocator.free_blocks.len, 0);
+        }
+    }
+
+    #[test]
+    fn wrapper_works() {
+        let allocator = Wrapper::new();
+        unsafe {
+            let layout1 = Layout::array::<u8>(8).unwrap();
+            let mut address1 = allocator.allocate(layout1).unwrap();
+            let slice1 = address1.as_mut();
+
+            slice1.fill(69);
+
+            let layout2 = Layout::array::<u8>(PAGE_SIZE * 2).unwrap();
+            let mut address2 = allocator.allocate(layout2).unwrap();
+            let slice2 = address2.as_mut();
+
+            slice2.fill(69);
+
+            for value in slice1 {
+                assert_eq!(value, &69);
+            }
+
+            allocator.deallocate(address1.cast(), layout1);
+
+            for value in slice2 {
+                assert_eq!(value, &69);
+            }
+
+            allocator.deallocate(address2.cast(), layout2);
         }
     }
 }
