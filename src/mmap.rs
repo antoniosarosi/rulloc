@@ -440,7 +440,7 @@ impl FreeList {
     /// Helper function for adding blocks to the free list. `block` must be
     /// valid.
     pub unsafe fn append_block(&mut self, mut block: NonNull<Header<Block>>) {
-        self.append((), block.as_ptr().offset(1) as *mut u8);
+        self.append((), Header::content_address_of(block));
         block.as_mut().data.is_free = true;
     }
 
