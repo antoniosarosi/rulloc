@@ -51,5 +51,8 @@ fn main() {
             next_chunk_size,
             v.as_ptr()
         );
+
+        println!("First 15 elements: {:?}", &v[0..15]);
+        println!("Last 15 elements: {:?}", &v[v.len() - 15..]);
     }
 }

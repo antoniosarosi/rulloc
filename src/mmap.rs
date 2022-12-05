@@ -208,10 +208,9 @@ type FreeListNode = Node<()>;
 /// See [`FreeListNode`].
 type FreeList = LinkedList<()>;
 
-/// General purpose allocator. All memory is requested from the kernel using
-/// [`libc::mmap`] and some tricks and optimizations are implemented such as
-/// free list, block coalescing and block splitting.
-pub struct MmapAllocator {
+/// This is the main allocator, but it has to be wrapped in [`UnsafeCell`] to
+/// satisfy [`std::alloc::Allocator`] trait. See [`MmapAllocator`].
+struct InternalAllocator {
     /// Free list.
     free_blocks: FreeList,
     /// First region that we've allocated with `mmap`.
@@ -469,7 +468,7 @@ impl FreeList {
     }
 }
 
-impl MmapAllocator {
+impl InternalAllocator {
     // Constructs a new allocator. No actual allocations happen until memory
     // is requested using [`MmapAllocator::alloc`].
     pub fn new() -> Self {
@@ -834,19 +833,22 @@ impl MmapAllocator {
     }
 }
 
-pub struct Wrapper {
-    allocator: UnsafeCell<MmapAllocator>,
+/// General purpose allocator. All memory is requested from the kernel using
+/// [`libc::mmap`] and some tricks and optimizations are implemented such as
+/// free list, block coalescing and block splitting.
+pub struct MmapAllocator {
+    allocator: UnsafeCell<InternalAllocator>,
 }
 
-impl Wrapper {
+impl MmapAllocator {
     pub fn new() -> Self {
         Self {
-            allocator: UnsafeCell::new(MmapAllocator::new()),
+            allocator: UnsafeCell::new(InternalAllocator::new()),
         }
     }
 }
 
-unsafe impl Allocator for Wrapper {
+unsafe impl Allocator for MmapAllocator {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         unsafe { (*self.allocator.get()).allocate(layout) }
     }
@@ -863,7 +865,7 @@ mod tests {
     #[test]
     fn basic_checks() {
         unsafe {
-            let mut allocator = MmapAllocator::new();
+            let mut allocator = InternalAllocator::new();
 
             // Request 1 byte, should call `mmap` with length of PAGE_SIZE.
             let first_layout = Layout::new::<u8>();
@@ -991,7 +993,7 @@ mod tests {
 
     #[test]
     fn wrapper_works() {
-        let allocator = Wrapper::new();
+        let allocator = MmapAllocator::new();
         unsafe {
             let layout1 = Layout::array::<u8>(8).unwrap();
             let mut address1 = allocator.allocate(layout1).unwrap();

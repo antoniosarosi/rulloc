@@ -7,4 +7,4 @@ mod mmap;
 
 pub use align::align;
 pub use bump::BumpAllocator;
-pub use mmap::Wrapper as MmapAllocator;
+pub use mmap::MmapAllocator;
