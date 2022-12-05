@@ -70,19 +70,19 @@ struct LinkedList<T> {
 /// looks like in memory:
 ///
 /// ```text
-/// +--------------------------+            <-----------------+
-/// | pointer to next block    |   <------+                   |
-/// +--------------------------+          | Link<Node<Block>> |
-/// | pointer to prev block    |   <------+                   |
-/// +--------------------------+                              |
-/// | pointer to block region  |   <------+                   |
-/// +--------------------------+          |                   | <Node<Block>>
-/// | block size               |          |                   |
-/// +--------------------------+          | Block             |
-/// | is free flag             |          |                   |
-/// +--------------------------+          |                   |
-/// | padding (word alignment) |   <------+                   |
-/// +--------------------------+            <-----------------+
+/// +--------------------------+          <----------------------+
+/// | pointer to next block    |   <------+                      |
+/// +--------------------------+          | Pointer<Node<Block>> |
+/// | pointer to prev block    |   <------+                      |
+/// +--------------------------+                                 |
+/// | pointer to block region  |   <------+                      |
+/// +--------------------------+          |                      | <Node<Block>>
+/// | block size               |          |                      |
+/// +--------------------------+          | Block                |
+/// | is free flag             |          |                      |
+/// +--------------------------+          |                      |
+/// | padding (word alignment) |   <------+                      |
+/// +--------------------------+          <----------------------+
 /// |      User content        |   <------+
 /// |           ...            |          |
 /// |           ...            |          | This is where the user writes stuff.
@@ -405,7 +405,7 @@ impl<T> LinkedList<T> {
 
         node.as_mut().next = Some(NonNull::new_unchecked(next));
 
-        if node.as_ptr() == self.tail.unwrap().as_ptr() {
+        if node == self.tail.unwrap() {
             self.tail = node.as_ref().next;
         }
 
