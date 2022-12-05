@@ -13,7 +13,7 @@ fn print_alloc(addr: NonNull<u8>, layout: Layout) {
 }
 
 fn main() {
-    let allocator = MmapAllocator::new();
+    let allocator = MmapAllocator::default();
 
     unsafe {
         let layout1 = Layout::new::<u8>();

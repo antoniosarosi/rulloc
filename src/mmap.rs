@@ -208,13 +208,49 @@ type FreeListNode = Node<()>;
 /// See [`FreeListNode`].
 type FreeList = LinkedList<()>;
 
-/// This is the main allocator, but it has to be wrapped in [`UnsafeCell`] to
-/// satisfy [`std::alloc::Allocator`] trait. See [`MmapAllocator`].
-struct InternalAllocator {
+struct Bucket {
     /// Free list.
     free_blocks: FreeList,
     /// First region that we've allocated with `mmap`.
     regions: LinkedList<Region>,
+}
+
+/// This is the main allocator, but it has to be wrapped in [`UnsafeCell`] to
+/// satisfy [`std::alloc::Allocator`] trait. See [`MmapAllocator`].
+struct InternalAllocator<const N: usize> {
+    sizes: [usize; N],
+    /// Fixed size buckets.
+    buckets: [Bucket; N],
+    /// Any allocation request of size > sizes[N - 1] will use this bucket.
+    dyn_bucket: Bucket,
+}
+
+impl<const N: usize> InternalAllocator<N> {
+    pub fn with_bucket_sizes(sizes: [usize; N]) -> Self {
+        InternalAllocator::<N> {
+            sizes,
+            buckets: sizes.map(|_| Bucket::new()),
+            dyn_bucket: Bucket::new(),
+        }
+    }
+
+    fn dispatch(&mut self, layout: Layout) -> &mut Bucket {
+        for (i, bucket) in self.buckets.iter_mut().enumerate() {
+            if layout.size() <= self.sizes[i] {
+                return bucket;
+            }
+        }
+
+        &mut self.dyn_bucket
+    }
+
+    pub unsafe fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.dispatch(layout).allocate(layout)
+    }
+
+    pub unsafe fn deallocate(&mut self, address: NonNull<u8>, layout: Layout) {
+        self.dispatch(layout).deallocate(address, layout)
+    }
 }
 
 impl<T> Header<T> {
@@ -468,7 +504,7 @@ impl FreeList {
     }
 }
 
-impl InternalAllocator {
+impl Bucket {
     // Constructs a new allocator. No actual allocations happen until memory
     // is requested using [`MmapAllocator::alloc`].
     pub fn new() -> Self {
@@ -836,19 +872,27 @@ impl InternalAllocator {
 /// General purpose allocator. All memory is requested from the kernel using
 /// [`libc::mmap`] and some tricks and optimizations are implemented such as
 /// free list, block coalescing and block splitting.
-pub struct MmapAllocator {
-    allocator: UnsafeCell<InternalAllocator>,
+pub struct MmapAllocator<const N: usize = 3> {
+    allocator: UnsafeCell<InternalAllocator<N>>,
 }
 
-impl MmapAllocator {
-    pub fn new() -> Self {
+impl Default for MmapAllocator {
+    fn default() -> Self {
         Self {
-            allocator: UnsafeCell::new(InternalAllocator::new()),
+            allocator: UnsafeCell::new(InternalAllocator::with_bucket_sizes([128, 1024, 8192])),
         }
     }
 }
 
-unsafe impl Allocator for MmapAllocator {
+impl<const N: usize> MmapAllocator<N> {
+    pub fn with_bucket_sizes(sizes: [usize; N]) -> Self {
+        Self {
+            allocator: UnsafeCell::new(InternalAllocator::with_bucket_sizes(sizes)),
+        }
+    }
+}
+
+unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         unsafe { (*self.allocator.get()).allocate(layout) }
     }
@@ -865,19 +909,19 @@ mod tests {
     #[test]
     fn basic_checks() {
         unsafe {
-            let mut allocator = InternalAllocator::new();
+            let mut bucket = Bucket::new();
 
             // Request 1 byte, should call `mmap` with length of PAGE_SIZE.
             let first_layout = Layout::new::<u8>();
-            let first_addr = allocator.allocate(first_layout).unwrap().cast::<u8>();
+            let first_addr = bucket.allocate(first_layout).unwrap().cast::<u8>();
 
             // We'll use this later to check memory corruption.
             *first_addr.as_ptr() = 69;
 
             // First region should be PAGE_SIZE in length.
-            let first_region = allocator.regions.head.unwrap();
+            let first_region = bucket.regions.head.unwrap();
             assert_eq!(first_region.as_ref().total_size(), PAGE_SIZE);
-            assert_eq!(allocator.regions.len, 1);
+            assert_eq!(bucket.regions.len, 1);
 
             let first_block = first_region.as_ref().first_block();
 
@@ -890,7 +934,7 @@ mod tests {
             // Size of first block should be minimum size because we've
             // requested 1 byte only.
             assert_eq!(first_block.as_ref().size(), MIN_BLOCK_SIZE);
-            assert_eq!(allocator.free_blocks.len, 1);
+            assert_eq!(bucket.free_blocks.len, 1);
 
             // Region should have two blocks, we are using the first one and the
             // other one is free.
@@ -899,14 +943,14 @@ mod tests {
             // First free block should match this size because there are
             // two blocks in the region and one of them has minimum size.
             assert_eq!(
-                allocator.free_blocks.first_free_block().unwrap().size(),
+                bucket.free_blocks.first_free_block().unwrap().size(),
                 PAGE_SIZE - REGION_HEADER_SIZE - BLOCK_HEADER_SIZE * 2 - MIN_BLOCK_SIZE
             );
 
             // The remaining free block should be split in two when allocating
             // less size than it can hold.
             let second_layout = Layout::array::<u8>(PAGE_SIZE / 2).unwrap();
-            let second_addr = allocator.allocate(second_layout).unwrap().cast::<u8>();
+            let second_addr = bucket.allocate(second_layout).unwrap().cast::<u8>();
 
             // We'll check corruption later.
             for _ in 0..second_layout.size() {
@@ -915,7 +959,7 @@ mod tests {
 
             // There are 3 blocks now, last one is still free.
             assert_eq!(first_region.as_ref().num_blocks(), 3);
-            assert_eq!(allocator.free_blocks.len, 1);
+            assert_eq!(bucket.free_blocks.len, 1);
 
             // Lets try to allocate the entire remaining free block.
             let remaining_size = PAGE_SIZE
@@ -924,7 +968,7 @@ mod tests {
                 - (BLOCK_HEADER_SIZE + PAGE_SIZE / 2) // Second Alloc
                 - BLOCK_HEADER_SIZE;
             let third_layout = Layout::array::<u8>(remaining_size).unwrap();
-            let third_addr = allocator.allocate(third_layout).unwrap().cast::<u8>();
+            let third_addr = bucket.allocate(third_layout).unwrap().cast::<u8>();
 
             for _ in 0..third_layout.size() {
                 *third_addr.as_ptr() = 69;
@@ -933,7 +977,7 @@ mod tests {
             // Number of blocks hasn't changed, but we don't have free blocks
             // anymore.
             assert_eq!(first_region.as_ref().num_blocks(), 3);
-            assert_eq!(allocator.free_blocks.len, 0);
+            assert_eq!(bucket.free_blocks.len, 0);
 
             // Time for checking memory corruption
             assert_eq!(*first_addr.as_ptr(), 69);
@@ -946,38 +990,38 @@ mod tests {
 
             // Let's request a bigger chunk so that a new region is used.
             let fourth_layout = Layout::array::<u8>(PAGE_SIZE * 2 - PAGE_SIZE / 2).unwrap();
-            let fourth_addr = allocator.allocate(fourth_layout).unwrap().cast::<u8>();
+            let fourth_addr = bucket.allocate(fourth_layout).unwrap().cast::<u8>();
 
             for _ in 0..fourth_layout.size() {
                 *fourth_addr.as_ptr() = 69;
             }
 
             // We should have a new region and a new free block now.
-            assert_eq!(allocator.regions.len, 2);
-            assert_eq!(allocator.free_blocks.len, 1);
+            assert_eq!(bucket.regions.len, 2);
+            assert_eq!(bucket.free_blocks.len, 1);
 
             // Let's play with dealloc.
-            allocator.deallocate(first_addr, first_layout);
+            bucket.deallocate(first_addr, first_layout);
 
             // After deallocating the first block, we should have a new free
             // block but the number of blocks in the region shouldn't change
             // because no coalescing can happen.
             assert_eq!(first_region.as_ref().num_blocks(), 3);
-            assert_eq!(allocator.free_blocks.len, 2);
+            assert_eq!(bucket.free_blocks.len, 2);
 
-            allocator.deallocate(third_addr, third_layout);
+            bucket.deallocate(third_addr, third_layout);
 
             // Again, after deallocating the third block we should have a new
             // free block but the number of block in the region doesn't change.
             assert_eq!(first_region.as_ref().num_blocks(), 3);
-            assert_eq!(allocator.free_blocks.len, 3);
+            assert_eq!(bucket.free_blocks.len, 3);
 
             // Now here comes the magic, if we deallocate second addr all blocks
             // in region one should be merged and region should be returned to
             // the kernel.
-            allocator.deallocate(second_addr, second_layout);
-            assert_eq!(allocator.regions.len, 1);
-            assert_eq!(allocator.free_blocks.len, 1);
+            bucket.deallocate(second_addr, second_layout);
+            assert_eq!(bucket.regions.len, 1);
+            assert_eq!(bucket.free_blocks.len, 1);
 
             // Check mem corruption in the last block
             for _ in 0..fourth_layout.size() {
@@ -985,15 +1029,15 @@ mod tests {
             }
 
             // Deallocating fourh address should unmap the last region.
-            allocator.deallocate(fourth_addr, fourth_layout);
-            assert_eq!(allocator.regions.len, 0);
-            assert_eq!(allocator.free_blocks.len, 0);
+            bucket.deallocate(fourth_addr, fourth_layout);
+            assert_eq!(bucket.regions.len, 0);
+            assert_eq!(bucket.free_blocks.len, 0);
         }
     }
 
     #[test]
     fn wrapper_works() {
-        let allocator = MmapAllocator::new();
+        let allocator = MmapAllocator::default();
         unsafe {
             let layout1 = Layout::array::<u8>(8).unwrap();
             let mut address1 = allocator.allocate(layout1).unwrap();
@@ -1018,6 +1062,62 @@ mod tests {
             }
 
             allocator.deallocate(address2.cast(), layout2);
+        }
+    }
+
+    #[test]
+    fn buckets_work() {
+        unsafe {
+            let mut allocator = InternalAllocator::<3>::with_bucket_sizes([8, 16, 24]);
+
+            let layout1 = Layout::new::<u8>();
+            let addr1 = allocator.allocate(layout1).unwrap().cast();
+
+            assert_eq!(allocator.buckets[0].regions.len, 1);
+            assert_eq!(allocator.buckets[1].regions.len, 0);
+            assert_eq!(allocator.buckets[2].regions.len, 0);
+
+            let layout2 = Layout::array::<u8>(16).unwrap();
+            let addr2 = allocator.allocate(layout2).unwrap().cast();
+
+            assert_eq!(allocator.buckets[0].regions.len, 1);
+            assert_eq!(allocator.buckets[1].regions.len, 1);
+            assert_eq!(allocator.buckets[2].regions.len, 0);
+
+            let layout3 = Layout::array::<u8>(20).unwrap();
+            let addr3 = allocator.allocate(layout3).unwrap().cast();
+
+            assert_eq!(allocator.buckets[0].regions.len, 1);
+            assert_eq!(allocator.buckets[1].regions.len, 1);
+            assert_eq!(allocator.buckets[2].regions.len, 1);
+
+            allocator.deallocate(addr1, layout1);
+
+            assert_eq!(allocator.buckets[0].regions.len, 0);
+            assert_eq!(allocator.buckets[1].regions.len, 1);
+            assert_eq!(allocator.buckets[2].regions.len, 1);
+
+            allocator.deallocate(addr2, layout2);
+
+            assert_eq!(allocator.buckets[0].regions.len, 0);
+            assert_eq!(allocator.buckets[1].regions.len, 0);
+            assert_eq!(allocator.buckets[2].regions.len, 1);
+
+            allocator.deallocate(addr3, layout3);
+
+            assert_eq!(allocator.buckets[0].regions.len, 0);
+            assert_eq!(allocator.buckets[1].regions.len, 0);
+            assert_eq!(allocator.buckets[2].regions.len, 0);
+
+            let layout4 = Layout::array::<u8>(32).unwrap();
+            let addr4 = allocator.allocate(layout4).unwrap().cast();
+
+            assert_eq!(allocator.buckets[0].regions.len, 0);
+            assert_eq!(allocator.buckets[1].regions.len, 0);
+            assert_eq!(allocator.buckets[2].regions.len, 0);
+            assert_eq!(allocator.dyn_bucket.regions.len, 1);
+
+            allocator.deallocate(addr4, layout4);
         }
     }
 }
