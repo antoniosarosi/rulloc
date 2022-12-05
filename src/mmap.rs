@@ -655,7 +655,7 @@ impl MmapAllocator {
             Block {
                 size: region.as_ref().size() - BLOCK_HEADER_SIZE,
                 is_free: true,
-                region: NonNull::new_unchecked(address.as_ptr() as *mut Header<Region>),
+                region,
             },
             Header::content_address_of(region),
         );
