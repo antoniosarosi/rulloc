@@ -1,3 +1,6 @@
+#![feature(allocator_api)]
+#![feature(is_some_and)]
+
 mod align;
 mod bump;
 mod mmap;

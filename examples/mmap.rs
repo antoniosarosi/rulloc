@@ -11,17 +11,17 @@ fn main() {
     let mut allocator = MmapAllocator::new();
 
     unsafe {
-        let addr1 = allocator.alloc(Layout::new::<u8>());
+        let addr1 = allocator.allocate(Layout::new::<u8>());
         print_alloc(1, addr1);
 
-        let addr2 = allocator.alloc(Layout::array::<u8>(1024).unwrap());
+        let addr2 = allocator.allocate(Layout::array::<u8>(1024).unwrap());
         print_alloc(1024, addr2);
 
-        let addr3 = allocator.alloc(Layout::array::<u8>(4096).unwrap());
+        let addr3 = allocator.allocate(Layout::array::<u8>(4096).unwrap());
         print_alloc(4096, addr3);
 
-        allocator.dealloc(addr1);
-        allocator.dealloc(addr2);
-        allocator.dealloc(addr3);
+        allocator.deallocate(addr1);
+        allocator.deallocate(addr2);
+        allocator.deallocate(addr3);
     }
 }
