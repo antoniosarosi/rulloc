@@ -16,6 +16,12 @@ Run the tests:
 cargo test
 ```
 
+Run with [Miri](https://github.com/rust-lang/miri):
+
+```bash
+cargo miri test mmap
+```
+
 If you want to start with something really simple, check the source code at
 [`src/bump.rs`](./src/bump.rs). The other allocator at
 [`src/mmap.rs`](./src/mmap.rs) is much more complicated and implements some

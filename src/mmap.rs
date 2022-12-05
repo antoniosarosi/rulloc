@@ -2,8 +2,6 @@ use std::{alloc::Layout, marker::PhantomData, mem, ptr, ptr::NonNull};
 
 use libc;
 
-use crate::align;
-
 /// Minimum block size in bytes. Read the documentation of the data structures
 /// used for this allocator to understand why it has this value. Specifically,
 /// see [`Header<T>`], [`Block`], [`Region`], [`LinkedList<T>`] and especially
@@ -15,6 +13,9 @@ const BLOCK_HEADER_SIZE: usize = mem::size_of::<Header<Block>>();
 
 /// Region header size in bytes. See [`Header<T>`] and [`Region`].
 const REGION_HEADER_SIZE: usize = mem::size_of::<Header<Region>>();
+
+/// Pointer size in bytes on the current machine.
+const POINTER_SIZE: usize = mem::size_of::<usize>();
 
 /// Virtual memory page size. 4096 bytes on most computers. This should be a
 /// constant but we don't know the value at compile time.
@@ -452,10 +453,11 @@ impl FreeList {
     }
 
     /// Returns a reference to the block header of the first block in the free
-    /// list.
+    /// list. Not used internally, for now we only need it for testing.
+    #[allow(dead_code)]
     pub unsafe fn first_free_block(&self) -> Option<&Header<Block>> {
-        self.head.and_then(|head| {
-            let block = Header::<Block>::from_free_list_node(head);
+        self.head.and_then(|node| {
+            let block = Header::<Block>::from_free_list_node(node);
             Some(block.as_ref())
         })
     }
@@ -475,12 +477,14 @@ impl MmapAllocator {
     /// Because of alignment and headers, it might allocate a bigger block than
     /// needed. As long as no more than `layout.align()` bytes are written on
     /// the content part of the block it should be fine.
-    pub unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
-        let size = align(if layout.size() >= MIN_BLOCK_SIZE {
+    pub unsafe fn alloc(&mut self, mut layout: Layout) -> *mut u8 {
+        layout = layout.align_to(POINTER_SIZE).unwrap().pad_to_align();
+
+        let size = if layout.size() >= MIN_BLOCK_SIZE {
             layout.size()
         } else {
             MIN_BLOCK_SIZE
-        });
+        };
 
         let free_block = match self.find_free_block(size) {
             Some(block) => block,
