@@ -4,6 +4,7 @@ use std::{
     marker::PhantomData,
     mem, ptr,
     ptr::NonNull,
+    sync::RwLock,
 };
 
 use libc;
@@ -538,10 +539,10 @@ impl Bucket {
         self.split_free_block_if_possible(free_block, size);
         self.free_blocks.remove_block(free_block);
 
-        Ok(NonNull::new_unchecked(ptr::slice_from_raw_parts_mut(
-            Header::content_address_of(free_block).as_ptr(),
+        Ok(NonNull::slice_from_raw_parts(
+            Header::content_address_of(free_block),
             free_block.as_ref().size(),
-        )))
+        ))
     }
 
     /// Deallocates the given pointer. Memory might not be returned to the OS
@@ -873,13 +874,17 @@ impl Bucket {
 /// [`libc::mmap`] and some tricks and optimizations are implemented such as
 /// free list, block coalescing and block splitting.
 pub struct MmapAllocator<const N: usize = 3> {
-    allocator: UnsafeCell<InternalAllocator<N>>,
+    allocator: RwLock<UnsafeCell<InternalAllocator<N>>>,
 }
+
+unsafe impl<const N: usize> Sync for MmapAllocator<N> {}
 
 impl Default for MmapAllocator {
     fn default() -> Self {
         Self {
-            allocator: UnsafeCell::new(InternalAllocator::with_bucket_sizes([128, 1024, 8192])),
+            allocator: RwLock::new(UnsafeCell::new(InternalAllocator::with_bucket_sizes([
+                128, 1024, 8192,
+            ]))),
         }
     }
 }
@@ -887,18 +892,25 @@ impl Default for MmapAllocator {
 impl<const N: usize> MmapAllocator<N> {
     pub fn with_bucket_sizes(sizes: [usize; N]) -> Self {
         Self {
-            allocator: UnsafeCell::new(InternalAllocator::with_bucket_sizes(sizes)),
+            allocator: RwLock::new(UnsafeCell::new(InternalAllocator::with_bucket_sizes(sizes))),
         }
     }
 }
 
 unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        unsafe { (*self.allocator.get()).allocate(layout) }
+        unsafe {
+            match self.allocator.write() {
+                Ok(allocator) => (*allocator.get()).allocate(layout),
+                Err(_) => Err(AllocError),
+            }
+        }
     }
 
     unsafe fn deallocate(&self, address: NonNull<u8>, layout: Layout) {
-        (*self.allocator.get()).deallocate(address, layout)
+        if let Ok(allocator) = self.allocator.write() {
+            (*allocator.get()).deallocate(address, layout)
+        }
     }
 }
 
@@ -1118,6 +1130,46 @@ mod tests {
             assert_eq!(allocator.dyn_bucket.regions.len, 1);
 
             allocator.deallocate(addr4, layout4);
+        }
+    }
+
+    #[test]
+    fn multiple_threads() {
+        use std::{sync, thread};
+
+        let allocator = MmapAllocator::default();
+
+        let num_threads: u8 = 8;
+
+        let barrier = sync::Barrier::new(8);
+
+        thread::scope(|scope| {
+            for _ in 0..num_threads {
+                scope.spawn(|| unsafe {
+                    let layout = Layout::array::<thread::ThreadId>(1024).unwrap();
+                    let addr = (&allocator).allocate(layout).unwrap().cast();
+                    let id = thread::current().id();
+                    for _ in 0..layout.size() {
+                        *addr.as_ptr() = id;
+                    }
+
+                    barrier.wait();
+
+                    for _ in 0..layout.size() {
+                        assert_eq!(*addr.as_ptr(), id);
+                    }
+
+                    allocator.deallocate(addr.cast(), layout);
+                });
+            }
+        });
+
+        unsafe {
+            let internal = allocator.allocator.read().unwrap().get();
+            for bucket in &(*internal).buckets {
+                assert_eq!(bucket.regions.len, 0);
+            }
+            assert_eq!((*internal).dyn_bucket.regions.len, 0);
         }
     }
 }

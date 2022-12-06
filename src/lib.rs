@@ -1,10 +1,7 @@
 #![feature(allocator_api)]
 #![feature(is_some_and)]
+#![feature(nonnull_slice_from_raw_parts)]
 
-mod align;
-mod bump;
 mod mmap;
 
-pub use align::align;
-pub use bump::BumpAllocator;
 pub use mmap::MmapAllocator;
