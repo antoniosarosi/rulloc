@@ -41,7 +41,7 @@ pub const BLOCK_HEADER_SIZE: usize = mem::size_of::<Header<Block>>();
 /// |           ...            |   <------+
 /// +--------------------------+
 /// ```
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Block {
     /// Memory region where this block is located.
     pub region: NonNull<Header<Region>>,

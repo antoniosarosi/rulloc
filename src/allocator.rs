@@ -9,6 +9,7 @@ use crate::bucket::Bucket;
 
 /// This is the main allocator, but it has to be wrapped in [`UnsafeCell`] to
 /// satisfy [`std::alloc::Allocator`] trait. See [`MmapAllocator`].
+#[derive(Debug)]
 struct InternalAllocator<const N: usize> {
     sizes: [usize; N],
     /// Fixed size buckets.
@@ -110,7 +111,10 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync, thread};
+    use std::{
+        sync,
+        thread::{self, ThreadId},
+    };
 
     use super::*;
     use crate::region::PAGE_SIZE;
@@ -201,28 +205,33 @@ mod tests {
         }
     }
 
+    /// We'll make all the threads do only allocs at the same time, then wait
+    /// and do only deallocs at the same time.
     #[test]
     fn multiple_threads_basic_checks() {
         let allocator = MmapAllocator::with_default_config();
 
-        let num_threads: u8 = 8;
+        let num_threads = 8;
 
-        let barrier = sync::Barrier::new(8);
+        let barrier = sync::Barrier::new(num_threads);
 
         thread::scope(|scope| {
             for _ in 0..num_threads {
                 scope.spawn(|| unsafe {
-                    let layout = Layout::array::<thread::ThreadId>(1024).unwrap();
-                    let addr = allocator.allocate(layout).unwrap().cast();
+                    let num_elements = 1024;
+                    let layout = Layout::array::<ThreadId>(num_elements).unwrap();
+                    let addr = allocator.allocate(layout).unwrap().cast::<ThreadId>();
                     let id = thread::current().id();
-                    for _ in 0..layout.size() {
-                        *addr.as_ptr() = id;
+
+                    for i in 0..num_elements {
+                        *addr.as_ptr().add(i) = id;
                     }
 
                     barrier.wait();
 
-                    for _ in 0..layout.size() {
-                        assert_eq!(*addr.as_ptr(), id);
+                    // Check memory corruption.
+                    for i in 0..num_elements {
+                        assert_eq!(*addr.as_ptr().add(i), id);
                     }
 
                     allocator.deallocate(addr.cast(), layout);
@@ -239,20 +248,59 @@ mod tests {
         }
     }
 
+    /// In this case we'll make the threads do allocs and deallocs
+    /// interchangeably.
     #[test]
     fn multiple_threads_allocating_and_deallocating() {
         let allocator = MmapAllocator::with_default_config();
 
-        let num_threads: u8 = 8;
+        let num_threads = 8;
+
+        let barrier = sync::Barrier::new(num_threads);
 
         thread::scope(|scope| {
             for _ in 0..num_threads {
                 scope.spawn(|| unsafe {
-                    let layout = Layout::array::<u8>(1024).unwrap();
+                    // We'll use different sizes to make sure that contention
+                    // over a single region or multiple regions doesn't cause
+                    // issues.
+                    let layouts = [16, 256, 1024, 2048, 4096, 8192]
+                        .map(|size| Layout::array::<u8>(size).unwrap());
 
-                    for _ in 0..10 {
-                        let address = allocator.allocate(layout).unwrap().cast();
-                        allocator.deallocate(address, layout);
+                    // Miri is really slow, but we don't need as many operations
+                    // to find bugs with it.
+                    let num_allocs = if cfg!(miri) { 20 } else { 5000 };
+
+                    for layout in layouts {
+                        barrier.wait();
+                        for _ in 0..num_allocs {
+                            let addr = allocator.allocate(layout).unwrap().cast::<u8>();
+                            if cfg!(miri) {
+                                // Since Miri is slow we won't write all the
+                                // bytes, just a few to check data races. If
+                                // somehow two threads receive the same address,
+                                // Miri will catch that.
+                                let offsets = [0, layout.size() / 2, layout.size() - 1];
+                                let values = [1, 5, 10];
+
+                                for (offset, value) in offsets.iter().zip(values) {
+                                    *addr.as_ptr().add(*offset) = value;
+                                }
+                                for (offset, value) in offsets.iter().zip(values) {
+                                    assert_eq!(*addr.as_ptr().add(*offset), value);
+                                }
+                            } else {
+                                // If we're not using Miri then write all the
+                                // bytes and check them again later.
+                                for i in 0..layout.size() {
+                                    *addr.as_ptr().add(i) = i as u8;
+                                }
+                                for i in 0..layout.size() {
+                                    assert_eq!(*addr.as_ptr().add(i), i as u8);
+                                }
+                            }
+                            allocator.deallocate(addr, layout);
+                        }
                     }
                 });
             }

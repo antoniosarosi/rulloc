@@ -45,7 +45,7 @@ unsafe fn page_size() -> usize {
 /// |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
 /// +--------+------------------------+      ---------+-------------------------------------+
 /// ```
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Region {
     /// Blocks contained within this memory region.
     pub blocks: LinkedList<Block>,

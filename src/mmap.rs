@@ -1,6 +1,4 @@
-use std::{ptr, ptr::NonNull};
-
-use libc;
+use std::ptr;
 
 use crate::Pointer;
 
@@ -22,7 +20,7 @@ pub unsafe fn mmap(length: usize) -> Pointer<u8> {
 
     match libc::mmap(null, length, protection, flags, -1, 0) {
         libc::MAP_FAILED => None,
-        address => Some(NonNull::new_unchecked(address as *mut u8)),
+        address => Some(ptr::NonNull::new_unchecked(address as *mut u8)),
     }
 }
 
@@ -44,7 +42,7 @@ pub unsafe fn mmap(length: usize) -> Pointer<u8> {
         .align_to(mem::size_of::<usize>());
     let address = std::alloc::alloc(layout.unwrap());
 
-    return Some(NonNull::new_unchecked(address));
+    return Some(ptr::NonNull::new_unchecked(address));
 }
 
 #[cfg(miri)]

@@ -16,7 +16,7 @@ use crate::{
 /// Pointer size in bytes on the current machine.
 pub const POINTER_SIZE: usize = mem::size_of::<usize>();
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Bucket {
     /// Free list.
     pub free_blocks: FreeList,
@@ -201,7 +201,7 @@ impl Bucket {
                 is_free: true,
                 region,
             },
-            address,
+            NonNull::new_unchecked(address),
         );
 
         self.free_blocks.append_block(new_block);

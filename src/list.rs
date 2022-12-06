@@ -14,7 +14,7 @@ pub struct Node<T> {
 /// parts and reduce raw pointer usage. It makes the code harder to follow, so
 /// if you want a simpler version without this abstraction check this commit:
 /// [`37b7752e2daa6707c93cd7badfa85c168f09aac8`](https://github.com/antoniosarosi/memalloc-rust/blob/37b7752e2daa6707c93cd7badfa85c168f09aac8/src/mmap.rs)
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct LinkedList<T> {
     pub head: Pointer<Node<T>>,
     pub tail: Pointer<Node<T>>,
@@ -49,26 +49,24 @@ impl<T> LinkedList<T> {
     /// * `address` - Memory address where the new node will be written. Must
     /// be valid and non null.
     pub unsafe fn append(&mut self, data: T, address: NonNull<u8>) -> NonNull<Header<T>> {
-        let node = address.as_ptr() as *mut Node<T>;
+        let node = address.cast();
 
-        *node = Node {
+        *node.as_ptr() = Node {
             prev: self.tail,
             next: None,
             data,
         };
 
-        let link = Some(NonNull::new_unchecked(node));
-
         if let Some(mut tail) = self.tail {
-            tail.as_mut().next = link;
+            tail.as_mut().next = Some(node);
         } else {
-            self.head = link;
+            self.head = Some(node);
         }
 
-        self.tail = link;
+        self.tail = Some(node);
         self.len += 1;
 
-        NonNull::new_unchecked(node)
+        node
     }
 
     /// Inserts a new node with the given `data` right after the given `node`.
@@ -82,25 +80,27 @@ impl<T> LinkedList<T> {
         &mut self,
         mut node: NonNull<Node<T>>,
         data: T,
-        address: *mut u8,
+        address: NonNull<u8>,
     ) -> NonNull<Header<T>> {
-        let next = address as *mut Node<T>;
+        let new_node = address.cast();
 
-        *next = Node {
+        *new_node.as_ptr() = Node {
             prev: Some(node),
             next: node.as_ref().next,
             data,
         };
 
-        node.as_mut().next = Some(NonNull::new_unchecked(next));
-
         if node == self.tail.unwrap() {
-            self.tail = node.as_ref().next;
+            self.tail = Some(new_node);
+        } else {
+            node.as_ref().next.unwrap().as_mut().prev = Some(new_node);
         }
+
+        node.as_mut().next = Some(new_node);
 
         self.len += 1;
 
-        NonNull::new_unchecked(next)
+        new_node
     }
 
     /// Removes `node` from the linked list. `node` must be valid.
