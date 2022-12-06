@@ -39,6 +39,8 @@ pub unsafe fn munmap(address: *mut u8, length: usize) {
 
 #[cfg(miri)]
 pub unsafe fn mmap(length: usize) -> Pointer<u8> {
+    use std::alloc::Layout;
+    use std::mem;
     let layout = Layout::array::<u8>(length)
         .unwrap()
         .align_to(mem::size_of::<usize>());
@@ -49,6 +51,8 @@ pub unsafe fn mmap(length: usize) -> Pointer<u8> {
 
 #[cfg(miri)]
 pub unsafe fn munmap(address: *mut u8, length: usize) {
+    use std::alloc::Layout;
+    use std::mem;
     let layout = Layout::array::<u8>(length)
         .unwrap()
         .align_to(mem::size_of::<usize>());
