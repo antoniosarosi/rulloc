@@ -1,4 +1,4 @@
-use std::{mem, ptr::NonNull};
+use std::ptr::NonNull;
 
 use crate::list::Node;
 
@@ -32,7 +32,7 @@ impl<T> Header<T> {
     /// that we previously provided when allocating. As long as that's true,
     /// this is safe, otherwise it's undefined behaviour.
     pub unsafe fn from_content_address(address: NonNull<u8>) -> NonNull<Self> {
-        NonNull::new_unchecked(address.as_ptr().sub(mem::size_of::<Self>()) as *mut Self)
+        NonNull::new_unchecked(address.as_ptr().cast::<Self>().offset(-1))
     }
 
     /// Returns the address after the header.

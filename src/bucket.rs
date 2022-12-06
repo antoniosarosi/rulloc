@@ -293,10 +293,10 @@ impl Bucket {
     }
 }
 
+#[cfg(test)]
 mod tests {
-    use crate::region::PAGE_SIZE;
-
     use super::*;
+    use crate::region::PAGE_SIZE;
 
     #[test]
     fn basic_checks() {

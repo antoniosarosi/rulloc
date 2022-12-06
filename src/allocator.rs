@@ -2,7 +2,7 @@ use std::{
     alloc::{AllocError, Allocator, GlobalAlloc, Layout},
     cell::UnsafeCell,
     ptr::{self, NonNull},
-    sync::RwLock,
+    sync::Mutex,
 };
 
 use crate::bucket::Bucket;
@@ -49,7 +49,7 @@ impl<const N: usize> InternalAllocator<N> {
 /// [`libc::mmap`] and some tricks and optimizations are implemented such as
 /// free list, block coalescing and block splitting.
 pub struct MmapAllocator<const N: usize = 3> {
-    allocator: RwLock<UnsafeCell<InternalAllocator<N>>>,
+    allocator: Mutex<UnsafeCell<InternalAllocator<N>>>,
 }
 
 unsafe impl GlobalAlloc for MmapAllocator {
@@ -76,7 +76,7 @@ impl Default for MmapAllocator {
 impl MmapAllocator {
     pub const fn with_default_config() -> Self {
         Self {
-            allocator: RwLock::new(UnsafeCell::new(InternalAllocator::with_bucket_sizes([
+            allocator: Mutex::new(UnsafeCell::new(InternalAllocator::with_bucket_sizes([
                 128, 1024, 8192,
             ]))),
         }
@@ -86,7 +86,7 @@ impl MmapAllocator {
 impl<const N: usize> MmapAllocator<N> {
     pub fn with_bucket_sizes(sizes: [usize; N]) -> Self {
         Self {
-            allocator: RwLock::new(UnsafeCell::new(InternalAllocator::with_bucket_sizes(sizes))),
+            allocator: Mutex::new(UnsafeCell::new(InternalAllocator::with_bucket_sizes(sizes))),
         }
     }
 }
@@ -94,16 +94,16 @@ impl<const N: usize> MmapAllocator<N> {
 unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         unsafe {
-            match self.allocator.write() {
-                Ok(allocator) => (*allocator.get()).allocate(layout),
+            match self.allocator.lock() {
+                Ok(mut allocator) => allocator.get_mut().allocate(layout),
                 Err(_) => Err(AllocError),
             }
         }
     }
 
     unsafe fn deallocate(&self, address: NonNull<u8>, layout: Layout) {
-        if let Ok(allocator) = self.allocator.write() {
-            (*allocator.get()).deallocate(address, layout)
+        if let Ok(mut allocator) = self.allocator.lock() {
+            allocator.get_mut().deallocate(address, layout)
         }
     }
 }
@@ -112,10 +112,8 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
 mod tests {
     use std::{sync, thread};
 
-    use crate::{region::{REGION_HEADER_SIZE, PAGE_SIZE}, block::{MIN_BLOCK_SIZE, BLOCK_HEADER_SIZE}};
-
     use super::*;
-
+    use crate::region::PAGE_SIZE;
 
     #[test]
     fn wrapper_works() {
@@ -233,7 +231,7 @@ mod tests {
         });
 
         unsafe {
-            let internal = allocator.allocator.read().unwrap().get();
+            let internal = allocator.allocator.lock().unwrap().get();
             for bucket in &(*internal).buckets {
                 assert_eq!(bucket.regions.len, 0);
             }
@@ -261,7 +259,7 @@ mod tests {
         });
 
         unsafe {
-            let internal = allocator.allocator.read().unwrap().get();
+            let internal = allocator.allocator.lock().unwrap().get();
             for bucket in &(*internal).buckets {
                 assert_eq!(bucket.regions.len, 0);
             }

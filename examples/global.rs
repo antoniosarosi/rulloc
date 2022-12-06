@@ -1,5 +1,20 @@
 use memalloc::MmapAllocator;
 
+// NOTE: This example doesn't work with Miri because we use the globall alocator
+// to simulate `mmap` calls when `cfg!(miri)`. If we are the globall allocator,
+// there are two problems:
+//
+// 1. We cannot do FFI calls when using Miri, so no `mmap`. That's why we
+// simulate them with `std::alloc::alloc`.
+//
+// 2. The allocator needs to acquire a `Mutex` lock in order to modify its
+// structures. Whenever somebody calls `allocate` on our allocator (for example
+// `Box`) the calling thread will acquire the lock. However, when the thread
+// calls `mmap` to obtain a new region, `std::alloc::alloc` will be called
+// instead, but WE are the allocator, so we'll try to acquire the lock again,
+// which causes a deadlock. It turns out that we cannot simulate ourselves
+// within ourselves :(
+
 #[global_allocator]
 static ALLOCATOR: MmapAllocator = MmapAllocator::with_default_config();
 

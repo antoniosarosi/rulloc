@@ -13,7 +13,6 @@ use crate::Pointer;
 #[cfg(not(miri))]
 pub unsafe fn mmap(length: usize) -> Pointer<u8> {
     // C void null pointer. This is what we need to request memory with mmap.
-
     let null = ptr::null_mut::<libc::c_void>();
     // Memory protection. Read-Write only.
     let protection = libc::PROT_READ | libc::PROT_WRITE;
@@ -39,8 +38,7 @@ pub unsafe fn munmap(address: *mut u8, length: usize) {
 
 #[cfg(miri)]
 pub unsafe fn mmap(length: usize) -> Pointer<u8> {
-    use std::alloc::Layout;
-    use std::mem;
+    use std::{alloc::Layout, mem};
     let layout = Layout::array::<u8>(length)
         .unwrap()
         .align_to(mem::size_of::<usize>());
@@ -51,8 +49,7 @@ pub unsafe fn mmap(length: usize) -> Pointer<u8> {
 
 #[cfg(miri)]
 pub unsafe fn munmap(address: *mut u8, length: usize) {
-    use std::alloc::Layout;
-    use std::mem;
+    use std::{alloc::Layout, mem};
     let layout = Layout::array::<u8>(length)
         .unwrap()
         .align_to(mem::size_of::<usize>());
