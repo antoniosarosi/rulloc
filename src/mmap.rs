@@ -1,5 +1,5 @@
 use std::{
-    alloc::{AllocError, Allocator, Layout},
+    alloc::{AllocError, Allocator, GlobalAlloc, Layout},
     cell::UnsafeCell,
     marker::PhantomData,
     mem, ptr,
@@ -64,6 +64,7 @@ type Header<T> = Node<T>;
 /// parts and reduce raw pointer usage. It makes the code harder to follow, so
 /// if you want a simpler version without this abstraction check this commit:
 /// [`37b7752e2daa6707c93cd7badfa85c168f09aac8`](https://github.com/antoniosarosi/memalloc-rust/blob/37b7752e2daa6707c93cd7badfa85c168f09aac8/src/mmap.rs)
+#[derive(Clone, Copy)]
 struct LinkedList<T> {
     head: Pointer<Node<T>>,
     tail: Pointer<Node<T>>,
@@ -97,6 +98,7 @@ struct LinkedList<T> {
 /// |           ...            |   <------+
 /// +--------------------------+
 /// ```
+#[derive(Clone, Copy)]
 struct Block {
     /// Memory region where this block is located.
     region: NonNull<Header<Region>>,
@@ -124,6 +126,7 @@ struct Block {
 /// |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
 /// +--------+------------------------+      ---------+-------------------------------------+
 /// ```
+#[derive(Clone, Copy)]
 struct Region {
     /// Blocks contained within this memory region.
     blocks: LinkedList<Block>,
@@ -209,6 +212,7 @@ type FreeListNode = Node<()>;
 /// See [`FreeListNode`].
 type FreeList = LinkedList<()>;
 
+#[derive(Clone, Copy)]
 struct Bucket {
     /// Free list.
     free_blocks: FreeList,
@@ -227,10 +231,10 @@ struct InternalAllocator<const N: usize> {
 }
 
 impl<const N: usize> InternalAllocator<N> {
-    pub fn with_bucket_sizes(sizes: [usize; N]) -> Self {
+    pub const fn with_bucket_sizes(sizes: [usize; N]) -> Self {
         InternalAllocator::<N> {
             sizes,
-            buckets: sizes.map(|_| Bucket::new()),
+            buckets: [Bucket::new(); N],
             dyn_bucket: Bucket::new(),
         }
     }
@@ -378,7 +382,7 @@ impl Header<Region> {
 impl<T> LinkedList<T> {
     /// Creates an empty linked list. No allocations happen because, well, we
     /// are the allocator.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             head: None,
             tail: None,
@@ -508,7 +512,7 @@ impl FreeList {
 impl Bucket {
     // Constructs a new allocator. No actual allocations happen until memory
     // is requested using [`MmapAllocator::alloc`].
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             free_blocks: FreeList::new(),
             regions: LinkedList::new(),
@@ -877,10 +881,29 @@ pub struct MmapAllocator<const N: usize = 3> {
     allocator: RwLock<UnsafeCell<InternalAllocator<N>>>,
 }
 
+unsafe impl GlobalAlloc for MmapAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        match self.allocate(layout) {
+            Ok(address) => address.cast().as_ptr(),
+            Err(_) => ptr::null_mut(),
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        self.deallocate(NonNull::new_unchecked(ptr), layout)
+    }
+}
+
 unsafe impl<const N: usize> Sync for MmapAllocator<N> {}
 
 impl Default for MmapAllocator {
     fn default() -> Self {
+        MmapAllocator::with_default_config()
+    }
+}
+
+impl MmapAllocator {
+    pub const fn with_default_config() -> Self {
         Self {
             allocator: RwLock::new(UnsafeCell::new(InternalAllocator::with_bucket_sizes([
                 128, 1024, 8192,
@@ -916,6 +939,8 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync, thread};
+
     use super::*;
 
     #[test]
@@ -1049,7 +1074,7 @@ mod tests {
 
     #[test]
     fn wrapper_works() {
-        let allocator = MmapAllocator::default();
+        let allocator = MmapAllocator::with_default_config();
         unsafe {
             let layout1 = Layout::array::<u8>(8).unwrap();
             let mut address1 = allocator.allocate(layout1).unwrap();
@@ -1134,10 +1159,8 @@ mod tests {
     }
 
     #[test]
-    fn multiple_threads() {
-        use std::{sync, thread};
-
-        let allocator = MmapAllocator::default();
+    fn multiple_threads_basic_checks() {
+        let allocator = MmapAllocator::with_default_config();
 
         let num_threads: u8 = 8;
 
@@ -1147,7 +1170,7 @@ mod tests {
             for _ in 0..num_threads {
                 scope.spawn(|| unsafe {
                     let layout = Layout::array::<thread::ThreadId>(1024).unwrap();
-                    let addr = (&allocator).allocate(layout).unwrap().cast();
+                    let addr = allocator.allocate(layout).unwrap().cast();
                     let id = thread::current().id();
                     for _ in 0..layout.size() {
                         *addr.as_ptr() = id;
@@ -1160,6 +1183,35 @@ mod tests {
                     }
 
                     allocator.deallocate(addr.cast(), layout);
+                });
+            }
+        });
+
+        unsafe {
+            let internal = allocator.allocator.read().unwrap().get();
+            for bucket in &(*internal).buckets {
+                assert_eq!(bucket.regions.len, 0);
+            }
+            assert_eq!((*internal).dyn_bucket.regions.len, 0);
+        }
+    }
+
+    #[test]
+    fn multiple_threads_allocating_and_deallocating() {
+        let allocator = MmapAllocator::with_default_config();
+
+        let num_threads: u8 = 8;
+
+        thread::scope(|scope| {
+            for _ in 0..num_threads {
+                scope.spawn(|| unsafe {
+                    let layout = Layout::array::<u8>(1024).unwrap();
+
+                    for _ in 0..10 {
+                        let address = allocator.allocate(layout).unwrap().cast();
+                        allocator.deallocate(address, layout);
+                    }
+
                 });
             }
         });
