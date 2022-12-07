@@ -88,13 +88,13 @@ impl<const N: usize> InternalAllocator<N> {
         &mut self.dyn_bucket
     }
 
-    /// Returns an address where `layout.size()` bytes can be safely written on
-    /// success or [`AllocError`] if it fails.
+    /// Returns an address where `layout.size()` bytes can be safely written or
+    /// [`AllocError`] if it fails to allocate.
     pub unsafe fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         self.dispatch(layout).allocate(layout)
     }
 
-    /// Deallocates the given pointer.
+    /// Deallocates the memory block at `address`.
     pub unsafe fn deallocate(&mut self, address: NonNull<u8>, layout: Layout) {
         self.dispatch(layout).deallocate(address, layout)
     }

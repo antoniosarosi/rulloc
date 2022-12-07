@@ -4,8 +4,8 @@ use crate::{freelist::FreeListNode, header::Header, region::Region};
 
 /// Minimum block size in bytes. Read the documentation of the data structures
 /// used for this allocator to understand why it has this value. Specifically,
-/// see [`Header<T>`], [`Block`], [`Region`], [`LinkedList<T>`] and especially
-/// [`FreeListNode`].
+/// see [`Header<T>`], [`Block`], [`Region`], [`crate::list::LinkedList<T>`] and
+/// especially [`FreeListNode`].
 pub(crate) const MIN_BLOCK_SIZE: usize = mem::size_of::<FreeListNode>();
 
 /// Block header size in bytes. See [`Header<T>`] and [`Block`].
@@ -13,8 +13,8 @@ pub(crate) const BLOCK_HEADER_SIZE: usize = mem::size_of::<Header<Block>>();
 
 /// Memory block specific data. All headers are also linked list nodes, see
 /// [`Header<T>`]. In this case, a complete block header would be
-/// [`Node<Block>`], also known as [`Header<Block>`]. Here's a graphical
-/// representation of how it looks like in memory:
+/// [`crate::list::Node<Block>`], also known as [`Header<Block>`]. Here's a
+/// graphical representation of how it looks like in memory:
 ///
 /// ```text
 /// +--------------------------+          <----------------------+
@@ -67,7 +67,7 @@ impl Header<Block> {
     }
 
     /// Helper function to reduce boilerplate. Since the complete block header
-    /// is `Header<Block>` all `Block` fields have to be accesses through
+    /// is [`Header<Block>`] all [`Block`] fields have to be accessed through
     /// `data`.
     pub fn is_free(&self) -> bool {
         self.data.is_free
