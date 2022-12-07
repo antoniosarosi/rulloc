@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// Pointer size in bytes on the current machine.
-pub const POINTER_SIZE: usize = mem::size_of::<usize>();
+pub(crate) const POINTER_SIZE: usize = mem::size_of::<usize>();
 
 /// This, on itself, is actually a memory allocator. But we use multiple of
 /// them for optimization purposes. Basically, we can configure different
@@ -45,11 +45,11 @@ pub const POINTER_SIZE: usize = mem::size_of::<usize>();
 ///
 /// ```
 #[derive(Clone, Copy, Debug)]
-pub struct Bucket {
+pub(crate) struct Bucket {
     /// Free list.
-    pub free_blocks: FreeList,
+    free_blocks: FreeList,
     /// All regions mapped by this bucket.
-    pub regions: LinkedList<Region>,
+    regions: LinkedList<Region>,
 }
 
 impl Bucket {
@@ -59,6 +59,12 @@ impl Bucket {
             free_blocks: FreeList::new(),
             regions: LinkedList::new(),
         }
+    }
+
+    /// Only used for testing at [`crate::allocator`].
+    #[cfg(test)]
+    pub fn regions(&self) -> &LinkedList<Region> {
+        &self.regions
     }
 
     /// Allocates a new block that can fit at least `layout.size()` bytes.
@@ -163,7 +169,7 @@ impl Bucket {
     /// Returns the first free block in the free list or `None` if we didn't
     /// find any.
     unsafe fn find_free_block(&self, size: usize) -> Pointer<Header<Block>> {
-        let mut current = self.free_blocks.head;
+        let mut current = self.free_blocks.first();
 
         while let Some(node) = current {
             let block = Header::<Block>::from_free_list_node(node);
@@ -330,7 +336,7 @@ mod tests {
     use crate::region::PAGE_SIZE;
 
     #[test]
-    fn basic_checks() {
+    fn regions_and_blocks() {
         unsafe {
             let mut bucket = Bucket::new();
 
@@ -342,9 +348,9 @@ mod tests {
             *first_addr.as_ptr() = 69;
 
             // First region should be PAGE_SIZE in length.
-            let first_region = bucket.regions.head.unwrap();
+            let first_region = bucket.regions.first().unwrap();
             assert_eq!(first_region.as_ref().total_size(), PAGE_SIZE);
-            assert_eq!(bucket.regions.len, 1);
+            assert_eq!(bucket.regions.len(), 1);
 
             let first_block = first_region.as_ref().first_block();
 
@@ -357,7 +363,7 @@ mod tests {
             // Size of first block should be minimum size because we've
             // requested 1 byte only.
             assert_eq!(first_block.as_ref().size(), MIN_BLOCK_SIZE);
-            assert_eq!(bucket.free_blocks.len, 1);
+            assert_eq!(bucket.free_blocks.len(), 1);
 
             // Region should have two blocks, we are using the first one and the
             // other one is free.
@@ -382,7 +388,7 @@ mod tests {
 
             // There are 3 blocks now, last one is still free.
             assert_eq!(first_region.as_ref().num_blocks(), 3);
-            assert_eq!(bucket.free_blocks.len, 1);
+            assert_eq!(bucket.free_blocks.len(), 1);
 
             // Lets try to allocate the entire remaining free block.
             let remaining_size = PAGE_SIZE
@@ -400,7 +406,7 @@ mod tests {
             // Number of blocks hasn't changed, but we don't have free blocks
             // anymore.
             assert_eq!(first_region.as_ref().num_blocks(), 3);
-            assert_eq!(bucket.free_blocks.len, 0);
+            assert_eq!(bucket.free_blocks.len(), 0);
 
             // Time for checking memory corruption
             assert_eq!(*first_addr.as_ptr(), 69);
@@ -420,8 +426,8 @@ mod tests {
             }
 
             // We should have a new region and a new free block now.
-            assert_eq!(bucket.regions.len, 2);
-            assert_eq!(bucket.free_blocks.len, 1);
+            assert_eq!(bucket.regions.len(), 2);
+            assert_eq!(bucket.free_blocks.len(), 1);
 
             // Let's play with dealloc.
             bucket.deallocate(first_addr, first_layout);
@@ -430,21 +436,21 @@ mod tests {
             // block but the number of blocks in the region shouldn't change
             // because no coalescing can happen.
             assert_eq!(first_region.as_ref().num_blocks(), 3);
-            assert_eq!(bucket.free_blocks.len, 2);
+            assert_eq!(bucket.free_blocks.len(), 2);
 
             bucket.deallocate(third_addr, third_layout);
 
             // Again, after deallocating the third block we should have a new
             // free block but the number of block in the region doesn't change.
             assert_eq!(first_region.as_ref().num_blocks(), 3);
-            assert_eq!(bucket.free_blocks.len, 3);
+            assert_eq!(bucket.free_blocks.len(), 3);
 
             // Now here comes the magic, if we deallocate second addr all blocks
             // in region one should be merged and region should be returned to
             // the kernel.
             bucket.deallocate(second_addr, second_layout);
-            assert_eq!(bucket.regions.len, 1);
-            assert_eq!(bucket.free_blocks.len, 1);
+            assert_eq!(bucket.regions.len(), 1);
+            assert_eq!(bucket.free_blocks.len(), 1);
 
             // Check mem corruption in the last block
             for _ in 0..fourth_layout.size() {
@@ -453,8 +459,8 @@ mod tests {
 
             // Deallocating fourh address should unmap the last region.
             bucket.deallocate(fourth_addr, fourth_layout);
-            assert_eq!(bucket.regions.len, 0);
-            assert_eq!(bucket.free_blocks.len, 0);
+            assert_eq!(bucket.regions.len(), 0);
+            assert_eq!(bucket.free_blocks.len(), 0);
         }
     }
 }

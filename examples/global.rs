@@ -43,5 +43,5 @@ fn main() {
     let mut vec: Vec<u8> = Vec::with_capacity(cap);
     vec.push(1);
 
-    println!("Large allocation of {cap} bytes at {:?}",  vec.as_ptr());
+    println!("Large allocation of {cap} bytes at {:?}", vec.as_ptr());
 }

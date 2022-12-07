@@ -6,7 +6,7 @@ use crate::{
     list::{LinkedList, Node},
 };
 
-/// See [`crate::block::Block`] and [`crate::region::Region`].
+/// See [`crate::block::Block`] and [`crate::region::Region`] first.
 /// When a block is free we'll use the content of the block to store a free
 /// list, that is, a linked list of _only_ free blocks. Since we want a doubly
 /// linked list, we need to store 2 pointers, one for the previous block and
@@ -81,10 +81,10 @@ use crate::{
 /// I suggest that you check out the following commit, which doesn't have
 /// [`LinkedList<T>`], to understand why this method reduces boilerplate:
 /// [`37b7752e2daa6707c93cd7badfa85c168f09aac8`](https://github.com/antoniosarosi/memalloc-rust/blob/37b7752e2daa6707c93cd7badfa85c168f09aac8/src/mmap.rs#L649-L687)
-pub type FreeListNode = Node<()>;
+pub(crate) type FreeListNode = Node<()>;
 
 /// See [`FreeListNode`].
-pub type FreeList = LinkedList<()>;
+pub(crate) type FreeList = LinkedList<()>;
 
 impl FreeList {
     /// Helper function for adding blocks to the free list. `block` must be
@@ -104,7 +104,7 @@ impl FreeList {
     /// list. Not used internally, for now we only need it for testing.
     #[allow(dead_code)]
     pub unsafe fn first_free_block(&self) -> Option<&Header<Block>> {
-        self.head.and_then(|node| {
+        self.first().and_then(|node| {
             let block = Header::<Block>::from_free_list_node(node);
             Some(block.as_ref())
         })

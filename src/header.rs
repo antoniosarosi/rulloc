@@ -6,7 +6,7 @@ use crate::list::Node;
 /// might as well consider them linked list nodes. This is just a type alias
 /// that we use when we want to refer to a block or region header without
 /// thinking about linked list nodes.
-pub type Header<T> = Node<T>;
+pub(crate) type Header<T> = Node<T>;
 
 impl<T> Header<T> {
     /// Returns a pointer to a [`Header<T>`] given an address that points right

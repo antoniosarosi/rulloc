@@ -6,10 +6,10 @@ use crate::{freelist::FreeListNode, header::Header, region::Region};
 /// used for this allocator to understand why it has this value. Specifically,
 /// see [`Header<T>`], [`Block`], [`Region`], [`LinkedList<T>`] and especially
 /// [`FreeListNode`].
-pub const MIN_BLOCK_SIZE: usize = mem::size_of::<FreeListNode>();
+pub(crate) const MIN_BLOCK_SIZE: usize = mem::size_of::<FreeListNode>();
 
 /// Block header size in bytes. See [`Header<T>`] and [`Block`].
-pub const BLOCK_HEADER_SIZE: usize = mem::size_of::<Header<Block>>();
+pub(crate) const BLOCK_HEADER_SIZE: usize = mem::size_of::<Header<Block>>();
 
 /// Memory block specific data. All headers are also linked list nodes, see
 /// [`Header<T>`]. In this case, a complete block header would be
@@ -38,7 +38,7 @@ pub const BLOCK_HEADER_SIZE: usize = mem::size_of::<Header<Block>>();
 /// +--------------------------+
 /// ```
 #[derive(Clone, Copy, Debug)]
-pub struct Block {
+pub(crate) struct Block {
     /// Memory region where this block is located.
     pub region: NonNull<Header<Region>>,
     /// Size of the block excluding [`Header<Block>`] size.

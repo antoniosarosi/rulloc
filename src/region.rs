@@ -7,17 +7,17 @@ use crate::{
 };
 
 /// Region header size in bytes. See [`Header<T>`] and [`Region`].
-pub const REGION_HEADER_SIZE: usize = mem::size_of::<Header<Region>>();
+pub(crate) const REGION_HEADER_SIZE: usize = mem::size_of::<Header<Region>>();
 
 /// Virtual memory page size. 4096 bytes on most computers. This should be a
 /// constant but we don't know the value at compile time.
-pub static mut PAGE_SIZE: usize = 0;
+pub(crate) static mut PAGE_SIZE: usize = 0;
 
 /// We only know the value of the page size at runtime by calliing
 /// [`libc::sysconf`], so we'll call that function once and then mutate a global
 /// variable to reuse it.
 #[inline]
-unsafe fn page_size() -> usize {
+pub(crate) unsafe fn page_size() -> usize {
     if PAGE_SIZE == 0 {
         PAGE_SIZE = libc::sysconf(libc::_SC_PAGE_SIZE) as usize
     }
@@ -44,7 +44,7 @@ unsafe fn page_size() -> usize {
 /// +--------+------------------------+      ---------+-------------------------------------+
 /// ```
 #[derive(Clone, Copy, Debug)]
-pub struct Region {
+pub(crate) struct Region {
     /// Blocks contained within this memory region.
     pub blocks: LinkedList<Block>,
     /// Size of the region excluding [`Header<Region>`] size.
@@ -58,7 +58,7 @@ impl Header<Region> {
     ///
     /// There is **ALWAYS** at least one block in the region.
     pub unsafe fn first_block(&self) -> NonNull<Header<Block>> {
-        self.data.blocks.head.unwrap_unchecked()
+        self.data.blocks.first().unwrap_unchecked()
     }
 
     /// Region size excluding [`REGION_HEADER_SIZE`].
@@ -73,7 +73,7 @@ impl Header<Region> {
 
     /// Number of blocks in this region.
     pub fn num_blocks(&self) -> usize {
-        self.data.blocks.len
+        self.data.blocks.len()
     }
 }
 
@@ -85,7 +85,7 @@ impl Header<Region> {
 /// * `size` - Amount of bytes that need to be allocated without including
 /// any header. This value must be **already aligned**.
 ///
-pub unsafe fn determine_region_length(size: usize) -> usize {
+pub(crate) unsafe fn determine_region_length(size: usize) -> usize {
     // We'll store at least one block in this region, so we need space for
     // region header, block header and user content.
     let total_size = REGION_HEADER_SIZE + BLOCK_HEADER_SIZE + size;
@@ -124,4 +124,42 @@ pub unsafe fn determine_region_length(size: usize) -> usize {
     }
 
     length
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_length() {
+        use crate::bucket::POINTER_SIZE;
+
+        unsafe {
+            // Basic checks.
+            assert_eq!(determine_region_length(POINTER_SIZE), page_size());
+            assert_eq!(determine_region_length(PAGE_SIZE / 2), PAGE_SIZE);
+            for i in 1..=100 {
+                assert_eq!(determine_region_length(PAGE_SIZE * i), PAGE_SIZE * (i + 1));
+            }
+
+            // Some corner cases.
+            let exact_remaining_space = PAGE_SIZE - REGION_HEADER_SIZE - BLOCK_HEADER_SIZE;
+            assert_eq!(determine_region_length(exact_remaining_space), PAGE_SIZE);
+
+            let enough_space_for_minimum_block_at_the_end =
+                PAGE_SIZE - REGION_HEADER_SIZE - 2 * BLOCK_HEADER_SIZE - MIN_BLOCK_SIZE;
+            assert_eq!(
+                determine_region_length(enough_space_for_minimum_block_at_the_end),
+                PAGE_SIZE
+            );
+
+            let not_enough_space_for_minimum_block_at_the_end =
+                PAGE_SIZE - REGION_HEADER_SIZE - 2 * BLOCK_HEADER_SIZE - MIN_BLOCK_SIZE
+                    + POINTER_SIZE;
+            assert_eq!(
+                determine_region_length(not_enough_space_for_minimum_block_at_the_end),
+                2 * PAGE_SIZE
+            );
+        }
+    }
 }

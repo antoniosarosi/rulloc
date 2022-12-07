@@ -3,7 +3,7 @@ use std::{marker::PhantomData, ptr::NonNull};
 use crate::{header::Header, Pointer};
 
 /// Linked list node. See also [`Header<T>`].
-pub struct Node<T> {
+pub(crate) struct Node<T> {
     pub next: Pointer<Self>,
     pub prev: Pointer<Self>,
     pub data: T,
@@ -15,10 +15,10 @@ pub struct Node<T> {
 /// if you want a simpler version without this abstraction check this commit:
 /// [`37b7752e2daa6707c93cd7badfa85c168f09aac8`](https://github.com/antoniosarosi/memalloc-rust/blob/37b7752e2daa6707c93cd7badfa85c168f09aac8/src/mmap.rs)
 #[derive(Clone, Copy, Debug)]
-pub struct LinkedList<T> {
-    pub head: Pointer<Node<T>>,
-    pub tail: Pointer<Node<T>>,
-    pub len: usize,
+pub(crate) struct LinkedList<T> {
+    head: Pointer<Node<T>>,
+    tail: Pointer<Node<T>>,
+    len: usize,
     marker: PhantomData<T>,
 }
 
@@ -32,6 +32,15 @@ impl<T> LinkedList<T> {
             len: 0,
             marker: PhantomData,
         }
+    }
+
+    /// Number of elements in the list.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn first(&self) -> Pointer<Header<T>> {
+        self.head
     }
 
     /// Appends a new node to the linked list. Since it cannot do allocations
@@ -122,5 +131,108 @@ impl<T> LinkedList<T> {
         }
 
         self.len -= 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{mem, ptr::NonNull};
+
+    use super::*;
+    use crate::{
+        mmap::{mmap, munmap},
+        region::page_size,
+    };
+
+    #[test]
+    fn linked_list_operations() {
+        unsafe {
+            let mut list: LinkedList<u8> = LinkedList::new();
+            let region = mmap(page_size()).unwrap();
+            let size = mem::size_of::<Node<u8>>();
+
+            // N1 <-> N2 <-> N3
+            let node1 = list.append(1, region);
+            let node2 = list.append(2, NonNull::new_unchecked(region.as_ptr().add(size)));
+            let node3 = list.append(3, NonNull::new_unchecked(region.as_ptr().add(size * 2)));
+
+            assert_eq!(list.len, 3);
+
+            assert_eq!(node1.as_ref().data, 1);
+            assert_eq!(node2.as_ref().data, 2);
+            assert_eq!(node3.as_ref().data, 3);
+
+            assert_eq!(list.head, Some(node1));
+            assert_eq!(list.tail, Some(node3));
+
+            assert_eq!(node1.as_ref().next, Some(node2));
+            assert_eq!(node1.as_ref().prev, None);
+
+            assert_eq!(node2.as_ref().next, Some(node3));
+            assert_eq!(node2.as_ref().prev, Some(node1));
+
+            assert_eq!(node3.as_ref().next, None);
+            assert_eq!(node3.as_ref().prev, Some(node2));
+
+            // N1 <-> N2 <-> N4 <-> N3
+            let node4 = list.insert_after(
+                node2,
+                4,
+                NonNull::new_unchecked(region.as_ptr().add(size * 3)),
+            );
+
+            assert_eq!(list.len, 4);
+
+            assert_eq!(list.tail, Some(node3));
+
+            assert_eq!(node4.as_ref().data, 4);
+            assert_eq!(node4.as_ref().next, Some(node3));
+            assert_eq!(node4.as_ref().prev, Some(node2));
+
+            assert_eq!(node2.as_ref().next, Some(node4));
+            assert_eq!(node2.as_ref().prev, Some(node1));
+
+            assert_eq!(node3.as_ref().next, None);
+            assert_eq!(node3.as_ref().prev, Some(node4));
+
+            // N1 <-> N2 <-> N3
+            list.remove(node4);
+
+            assert_eq!(list.len, 3);
+
+            assert_eq!(node2.as_ref().next, Some(node3));
+            assert_eq!(node2.as_ref().prev, Some(node1));
+
+            assert_eq!(node3.as_ref().next, None);
+            assert_eq!(node3.as_ref().prev, Some(node2));
+
+            // N1 <-> N2
+            list.remove(node3);
+
+            assert_eq!(list.len, 2);
+
+            assert_eq!(Some(node1), list.head);
+            assert_eq!(Some(node2), list.tail);
+            assert_eq!(node2.as_ref().next, None);
+            assert_eq!(node2.as_ref().prev, Some(node1));
+
+            // N2
+            list.remove(node1);
+
+            assert_eq!(list.len, 1);
+
+            assert_eq!(Some(node2), list.head);
+            assert_eq!(Some(node2), list.tail);
+            assert_eq!(node2.as_ref().next, None);
+            assert_eq!(node2.as_ref().prev, None);
+
+            // Empty
+            list.remove(node2);
+            assert_eq!(list.tail, None);
+            assert_eq!(list.head, None);
+            assert_eq!(list.len, 0);
+
+            munmap(region, page_size());
+        }
     }
 }

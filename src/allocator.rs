@@ -129,6 +129,12 @@ impl<const N: usize> MmapAllocator<N> {
     }
 }
 
+impl Default for MmapAllocator {
+    fn default() -> Self {
+        MmapAllocator::with_default_config()
+    }
+}
+
 unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         unsafe {
@@ -143,12 +149,6 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
         if let Ok(mut allocator) = self.allocator.lock() {
             allocator.get_mut().deallocate(address, layout)
         }
-    }
-}
-
-impl Default for MmapAllocator {
-    fn default() -> Self {
-        MmapAllocator::with_default_config()
     }
 }
 
@@ -176,18 +176,18 @@ mod tests {
     use crate::region::PAGE_SIZE;
 
     #[test]
-    fn wrapper_works() {
+    fn internal_allocator_wrapper() {
         let allocator = MmapAllocator::with_default_config();
         unsafe {
             let layout1 = Layout::array::<u8>(8).unwrap();
-            let mut address1 = allocator.allocate(layout1).unwrap();
-            let slice1 = address1.as_mut();
+            let mut addr1 = allocator.allocate(layout1).unwrap();
+            let slice1 = addr1.as_mut();
 
             slice1.fill(69);
 
             let layout2 = Layout::array::<u8>(PAGE_SIZE * 2).unwrap();
-            let mut address2 = allocator.allocate(layout2).unwrap();
-            let slice2 = address2.as_mut();
+            let mut addr2 = allocator.allocate(layout2).unwrap();
+            let slice2 = addr2.as_mut();
 
             slice2.fill(69);
 
@@ -195,76 +195,75 @@ mod tests {
                 assert_eq!(value, &69);
             }
 
-            allocator.deallocate(address1.cast(), layout1);
+            allocator.deallocate(addr1.cast(), layout1);
 
             for value in slice2 {
                 assert_eq!(value, &69);
             }
 
-            allocator.deallocate(address2.cast(), layout2);
+            allocator.deallocate(addr2.cast(), layout2);
         }
     }
 
     #[test]
-    fn buckets_work() {
+    fn buckets() {
         unsafe {
-            let mut allocator = InternalAllocator::<3>::with_bucket_sizes([8, 16, 24]);
+            let sizes = [8, 16, 24];
+            let mut allocator = InternalAllocator::<3>::with_bucket_sizes(sizes);
 
-            let layout1 = Layout::new::<u8>();
+            macro_rules! verify_number_of_regions_per_bucket {
+                ($expected:expr) => {
+                    for i in 0..sizes.len() {
+                        assert_eq!(allocator.buckets[i].regions().len(), $expected[i]);
+                    }
+                };
+            }
+
+            let layout1 = Layout::array::<u8>(sizes[0]).unwrap();
             let addr1 = allocator.allocate(layout1).unwrap().cast();
+            verify_number_of_regions_per_bucket!([1, 0, 0]);
 
-            assert_eq!(allocator.buckets[0].regions.len, 1);
-            assert_eq!(allocator.buckets[1].regions.len, 0);
-            assert_eq!(allocator.buckets[2].regions.len, 0);
-
-            let layout2 = Layout::array::<u8>(16).unwrap();
+            let layout2 = Layout::array::<u8>(sizes[1]).unwrap();
             let addr2 = allocator.allocate(layout2).unwrap().cast();
+            verify_number_of_regions_per_bucket!([1, 1, 0]);
 
-            assert_eq!(allocator.buckets[0].regions.len, 1);
-            assert_eq!(allocator.buckets[1].regions.len, 1);
-            assert_eq!(allocator.buckets[2].regions.len, 0);
-
-            let layout3 = Layout::array::<u8>(20).unwrap();
+            let layout3 = Layout::array::<u8>(sizes[2]).unwrap();
             let addr3 = allocator.allocate(layout3).unwrap().cast();
-
-            assert_eq!(allocator.buckets[0].regions.len, 1);
-            assert_eq!(allocator.buckets[1].regions.len, 1);
-            assert_eq!(allocator.buckets[2].regions.len, 1);
+            verify_number_of_regions_per_bucket!([1, 1, 1]);
 
             allocator.deallocate(addr1, layout1);
-
-            assert_eq!(allocator.buckets[0].regions.len, 0);
-            assert_eq!(allocator.buckets[1].regions.len, 1);
-            assert_eq!(allocator.buckets[2].regions.len, 1);
+            verify_number_of_regions_per_bucket!([0, 1, 1]);
 
             allocator.deallocate(addr2, layout2);
-
-            assert_eq!(allocator.buckets[0].regions.len, 0);
-            assert_eq!(allocator.buckets[1].regions.len, 0);
-            assert_eq!(allocator.buckets[2].regions.len, 1);
+            verify_number_of_regions_per_bucket!([0, 0, 1]);
 
             allocator.deallocate(addr3, layout3);
+            verify_number_of_regions_per_bucket!([0, 0, 0]);
 
-            assert_eq!(allocator.buckets[0].regions.len, 0);
-            assert_eq!(allocator.buckets[1].regions.len, 0);
-            assert_eq!(allocator.buckets[2].regions.len, 0);
-
-            let layout4 = Layout::array::<u8>(32).unwrap();
+            let layout4 = Layout::array::<u8>(sizes[2] + 128).unwrap();
             let addr4 = allocator.allocate(layout4).unwrap().cast();
-
-            assert_eq!(allocator.buckets[0].regions.len, 0);
-            assert_eq!(allocator.buckets[1].regions.len, 0);
-            assert_eq!(allocator.buckets[2].regions.len, 0);
-            assert_eq!(allocator.dyn_bucket.regions.len, 1);
+            verify_number_of_regions_per_bucket!([0, 0, 0]);
+            assert_eq!(allocator.dyn_bucket.regions().len(), 1);
 
             allocator.deallocate(addr4, layout4);
+            assert_eq!(allocator.dyn_bucket.regions().len(), 0);
+        }
+    }
+
+    fn verify_buckets_are_empty(allocator: MmapAllocator) {
+        unsafe {
+            let internal = allocator.allocator.lock().unwrap().get();
+            for bucket in &(*internal).buckets {
+                assert_eq!(bucket.regions().len(), 0);
+            }
+            assert_eq!((*internal).dyn_bucket.regions().len(), 0);
         }
     }
 
     /// We'll make all the threads do only allocs at the same time, then wait
     /// and do only deallocs at the same time.
     #[test]
-    fn multiple_threads_basic_checks() {
+    fn multiple_threads_synchronized_allocs_and_deallocs() {
         let allocator = MmapAllocator::with_default_config();
 
         let num_threads = 8;
@@ -295,19 +294,13 @@ mod tests {
             }
         });
 
-        unsafe {
-            let internal = allocator.allocator.lock().unwrap().get();
-            for bucket in &(*internal).buckets {
-                assert_eq!(bucket.regions.len, 0);
-            }
-            assert_eq!((*internal).dyn_bucket.regions.len, 0);
-        }
+        verify_buckets_are_empty(allocator);
     }
 
     /// In this case we'll make the threads do allocs and deallocs
     /// interchangeably.
     #[test]
-    fn multiple_threads_allocating_and_deallocating() {
+    fn multiple_threads_unsynchronized_allocs_and_deallocs() {
         let allocator = MmapAllocator::with_default_config();
 
         let num_threads = 8;
@@ -325,7 +318,7 @@ mod tests {
 
                     // Miri is really slow, but we don't need as many operations
                     // to find bugs with it.
-                    let num_allocs = if cfg!(miri) { 20 } else { 5000 };
+                    let num_allocs = if cfg!(miri) { 20 } else { 4000 };
 
                     for layout in layouts {
                         barrier.wait();
@@ -338,7 +331,6 @@ mod tests {
                                 // Miri will catch that.
                                 let offsets = [0, layout.size() / 2, layout.size() - 1];
                                 let values = [1, 5, 10];
-
                                 for (offset, value) in offsets.iter().zip(values) {
                                     *addr.as_ptr().add(*offset) = value;
                                 }
@@ -362,12 +354,6 @@ mod tests {
             }
         });
 
-        unsafe {
-            let internal = allocator.allocator.lock().unwrap().get();
-            for bucket in &(*internal).buckets {
-                assert_eq!(bucket.regions.len, 0);
-            }
-            assert_eq!((*internal).dyn_bucket.regions.len, 0);
-        }
+        verify_buckets_are_empty(allocator);
     }
 }
