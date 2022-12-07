@@ -43,7 +43,7 @@ fn main() {
 
         println!("Let's try some reallocs");
         let next_chunk_size = 1024;
-        for i in 0..1024 {
+        for i in 0..next_chunk_size {
             v.push(i);
         }
         println!(

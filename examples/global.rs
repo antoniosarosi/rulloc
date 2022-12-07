@@ -20,7 +20,7 @@ static ALLOCATOR: MmapAllocator = MmapAllocator::with_default_config();
 
 fn main() {
     let num = Box::new(10);
-    println!("Boxed num {num}");
+    println!("Boxed num {num} at {:?}", &*num as *const usize);
 
     let mut vec = Vec::with_capacity(*num);
 
@@ -39,8 +39,9 @@ fn main() {
 
     handle.join().unwrap();
 
-    let mut vec: Vec<u8> = Vec::with_capacity(1024 * 10);
+    let cap = 1024 * 1024;
+    let mut vec: Vec<u8> = Vec::with_capacity(cap);
     vec.push(1);
 
-    println!("Large allocation at {:?}", vec.as_ptr());
+    println!("Large allocation of {cap} bytes at {:?}",  vec.as_ptr());
 }

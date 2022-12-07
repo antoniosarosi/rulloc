@@ -1,7 +1,5 @@
 use std::{mem, ptr::NonNull};
 
-use libc;
-
 use crate::{
     block::{Block, BLOCK_HEADER_SIZE, MIN_BLOCK_SIZE},
     header::Header,
@@ -15,9 +13,9 @@ pub const REGION_HEADER_SIZE: usize = mem::size_of::<Header<Region>>();
 /// constant but we don't know the value at compile time.
 pub static mut PAGE_SIZE: usize = 0;
 
-/// We only know the value of the page size at runtime by calliing `sysconf`,
-/// so we'll call that function once and then mutate a global variable to reuse
-/// it.
+/// We only know the value of the page size at runtime by calliing
+/// [`libc::sysconf`], so we'll call that function once and then mutate a global
+/// variable to reuse it.
 #[inline]
 unsafe fn page_size() -> usize {
     if PAGE_SIZE == 0 {
@@ -104,7 +102,7 @@ pub unsafe fn determine_region_length(size: usize) -> usize {
     // length because of the round up, but we would end up with a little
     // chunk of 48 bytes at the end of the region where we cannot allocate
     // anything because block header + minimum block size doesn't fit in 48
-    // bytes.
+    // bytes. At least on 64 bit machines.
     //
     // +-----------------+
     // | Region header   | <---+

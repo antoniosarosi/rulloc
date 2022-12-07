@@ -7,10 +7,59 @@ use std::{
 
 use crate::bucket::Bucket;
 
-/// This is the main allocator, but it has to be wrapped in [`UnsafeCell`] to
-/// satisfy [`std::alloc::Allocator`] trait. See [`MmapAllocator`].
+/// This is the main allocator, it contains multiple allocation buckets for
+/// different sizes. Once you've read [`crate::header`], [`crate::block`],
+/// [`crate::region`], [`crate::freelist`] and [`crate::bucket`], this is where
+/// the circle gets completed:
+///
+/// ```text
+///                                           Next Free Block                    Next Free Block
+///                                |------------------------------------+   +-----------------------+
+///                                |                                    |   |                       |
+///               +--------+-------|----------------+      +--------+---|---|-----------------------|-----+
+///               |        | +-----|-+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
+/// buckets[0] -> | Region | | Free  | -> | Block | | ---> | Region | | Free  | -> | Block | -> | Free  | |
+///               |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
+///               +--------+------------------------+      ---------+-------------------------------------+
+///
+///                                           Next Free Block                    Next Free Block
+///                                |------------------------------------+   +-----------------------+
+///                                |                                    |   |                       |
+///               +--------+-------|----------------+      +--------+---|---|-----------------------|-----+
+///               |        | +-----|-+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
+/// buckets[1] -> | Region | | Free  | -> | Block | | ---> | Region | | Free  | -> | Block | -> | Free  | |
+///               |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
+///               +--------+------------------------+      ---------+-------------------------------------+
+///
+/// ...........
+///
+///                                             Next Free Block                    Next Free Block
+///                                  |------------------------------------+   +-----------------------+
+///                                  |                                    |   |                       |
+///                 +--------+-------|----------------+      +--------+---|---|-----------------------|-----+
+///                 |        | +-----|-+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
+/// buckets[N-1] -> | Region | | Free  | -> | Block | | ---> | Region | | Free  | -> | Block | -> | Free  | |
+///                 |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
+///                 +--------+------------------------+      ---------+-------------------------------------+
+///
+///                                           Next Free Block                    Next Free Block
+///                                |------------------------------------+   +-----------------------+
+///                                |                                    |   |                       |
+///               +--------+-------|----------------+      +--------+---|---|-----------------------|-----+
+///               |        | +-----|-+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
+/// dyn_bucket -> | Region | | Free  | -> | Block | | ---> | Region | | Free  | -> | Block | -> | Free  | |
+///               |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
+///               +--------+------------------------+      ---------+-------------------------------------+
+///
+/// ```
+///
+/// Number of buckets and size of each bucket can be configured at compile
+/// time. This struct is not thread safe and it also needs mutable borrows to
+/// operate, so it has to be wrapped in [`UnsafeCell`] to satisfy
+/// [`std::alloc::Allocator`] trait. See [`MmapAllocator`] for the public API.
 #[derive(Debug)]
 struct InternalAllocator<const N: usize> {
+    /// Size of each bucket, in bytes.
     sizes: [usize; N],
     /// Fixed size buckets.
     buckets: [Bucket; N],
@@ -19,6 +68,7 @@ struct InternalAllocator<const N: usize> {
 }
 
 impl<const N: usize> InternalAllocator<N> {
+    /// Builds a new allocator configured with the given bucket sizes.
     pub const fn with_bucket_sizes(sizes: [usize; N]) -> Self {
         InternalAllocator::<N> {
             sizes,
@@ -27,6 +77,7 @@ impl<const N: usize> InternalAllocator<N> {
         }
     }
 
+    /// Returns the [`Bucket`] where `layout` should be allocated.
     fn dispatch(&mut self, layout: Layout) -> &mut Bucket {
         for (i, bucket) in self.buckets.iter_mut().enumerate() {
             if layout.size() <= self.sizes[i] {
@@ -37,10 +88,13 @@ impl<const N: usize> InternalAllocator<N> {
         &mut self.dyn_bucket
     }
 
+    /// Returns an address where `layout.size()` bytes can be safely written on
+    /// success or [`AllocError`] if it fails.
     pub unsafe fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         self.dispatch(layout).allocate(layout)
     }
 
+    /// Deallocates the given pointer.
     pub unsafe fn deallocate(&mut self, address: NonNull<u8>, layout: Layout) {
         self.dispatch(layout).deallocate(address, layout)
     }
@@ -48,33 +102,15 @@ impl<const N: usize> InternalAllocator<N> {
 
 /// General purpose allocator. All memory is requested from the kernel using
 /// [`libc::mmap`] and some tricks and optimizations are implemented such as
-/// free list, block coalescing and block splitting.
+/// free list, block coalescing, block splitting and allocation buckets.
 pub struct MmapAllocator<const N: usize = 3> {
     allocator: Mutex<UnsafeCell<InternalAllocator<N>>>,
 }
 
-unsafe impl GlobalAlloc for MmapAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        match self.allocate(layout) {
-            Ok(address) => address.cast().as_ptr(),
-            Err(_) => ptr::null_mut(),
-        }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.deallocate(NonNull::new_unchecked(ptr), layout)
-    }
-}
-
 unsafe impl<const N: usize> Sync for MmapAllocator<N> {}
 
-impl Default for MmapAllocator {
-    fn default() -> Self {
-        MmapAllocator::with_default_config()
-    }
-}
-
 impl MmapAllocator {
+    /// Default configuration includes 3 buckets of sizes 128, 1024 and 8192.
     pub const fn with_default_config() -> Self {
         Self {
             allocator: Mutex::new(UnsafeCell::new(InternalAllocator::with_bucket_sizes([
@@ -85,6 +121,7 @@ impl MmapAllocator {
 }
 
 impl<const N: usize> MmapAllocator<N> {
+    /// Builds a new allocator configured with the given bucket sizes.
     pub fn with_bucket_sizes(sizes: [usize; N]) -> Self {
         Self {
             allocator: Mutex::new(UnsafeCell::new(InternalAllocator::with_bucket_sizes(sizes))),
@@ -106,6 +143,25 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
         if let Ok(mut allocator) = self.allocator.lock() {
             allocator.get_mut().deallocate(address, layout)
         }
+    }
+}
+
+impl Default for MmapAllocator {
+    fn default() -> Self {
+        MmapAllocator::with_default_config()
+    }
+}
+
+unsafe impl GlobalAlloc for MmapAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        match self.allocate(layout) {
+            Ok(address) => address.cast().as_ptr(),
+            Err(_) => ptr::null_mut(),
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        self.deallocate(NonNull::new_unchecked(ptr), layout)
     }
 }
 

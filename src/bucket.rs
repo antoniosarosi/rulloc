@@ -5,7 +5,8 @@ use std::{
 };
 
 use crate::{
-    block::{Block, FreeList, BLOCK_HEADER_SIZE, MIN_BLOCK_SIZE},
+    block::{Block, BLOCK_HEADER_SIZE, MIN_BLOCK_SIZE},
+    freelist::FreeList,
     header::Header,
     list::LinkedList,
     mmap::{mmap, munmap},
@@ -16,17 +17,43 @@ use crate::{
 /// Pointer size in bytes on the current machine.
 pub const POINTER_SIZE: usize = mem::size_of::<usize>();
 
+/// This, on itself, is actually a memory allocator. But we use multiple of
+/// them for optimization purposes. Basically, we can configure different
+/// buckets that will perform allocations of different sizes. So, for example,
+/// we might have a bucket for small allocations, say 128 bytes or less, and
+/// another bucket for allocations larger than 128 bytes. This method is called
+/// segregation list or segregation buckets. There's a visual representation
+/// at [`crate::allocator`]. The individual bucket on itself is only concerned
+/// about regions and blocks. See [`Header`], [`Block`], [`Region`] and
+/// [`FreeList`] for a full picture. To reiterate, this is what the bucket
+/// stores:
+///
+/// ```text
+///                              Next Free Block                    Next Free Block
+///                  |------------------------------------+   +-----------------------+
+///                  |                                    |   |                       |
+/// +--------+-------|----------------+      +--------+---|---|-----------------------|-----+
+/// |        | +-----|-+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
+/// | Region | | Free  | -> | Block | | ---> | Region | | Free  | -> | Block | -> | Free  | |
+/// |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
+/// +--------+------------------------+      ---------+-------------------------------------+
+///     ^          ^                              ^                                   ^
+///     |          |                              |                                   |
+///     |          +--- free_blocks.head          |                                   +--- free_blocks.tail
+///     |                                         |
+///     +--- regions.head                         +--- regions.tail
+///
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Bucket {
     /// Free list.
     pub free_blocks: FreeList,
-    /// First region that we've allocated with `mmap`.
+    /// All regions mapped by this bucket.
     pub regions: LinkedList<Region>,
 }
 
 impl Bucket {
-    // Constructs a new allocator. No actual allocations happen until memory
-    // is requested using [`MmapAllocator::alloc`].
+    /// Builds a new empty [`Bucket`].
     pub const fn new() -> Self {
         Self {
             free_blocks: FreeList::new(),
@@ -81,22 +108,21 @@ impl Bucket {
         // All blocks have been merged into one, so we can return this region
         // back to the kernel.
         if region.as_ref().num_blocks() == 1 {
-            // The free block in this region is no longer valid because this
+            // The only block in this region is no longer valid because the
             // region is about to be unmapped.
             self.free_blocks.remove_block(block);
 
             // Region has to be removed before unmapping, otherwise seg fault.
             self.regions.remove(region);
 
-            let length = region.as_ref().total_size() as libc::size_t;
-            munmap(region.as_ptr() as *mut u8, length);
+            munmap(region.cast(), region.as_ref().total_size());
         }
     }
 
     /// Requests a new memory region from the kernel where we can fit `size`
-    /// bytes plus headers. See [`MmapAllocator::determine_region_length`].
-    /// The region is already initiated with a free block that spans across
-    /// the entire region.
+    /// bytes plus headers. See [`determine_region_length`]. The returned region
+    /// will be initialized with a free block that spans across the entire
+    /// region.
     ///
     /// # Arguments
     ///
@@ -212,7 +238,7 @@ impl Bucket {
 
     /// This function performs the inverse of [`Self::split_free_block_if_possible`].
     /// If surrounding blocks are free, then we'll merge them all into one
-    /// bigger block.
+    /// bigger block. This is called block coalescing or block merging.
     ///
     /// **Before**:
     ///
@@ -242,6 +268,11 @@ impl Bucket {
     ///                         |     |  Content  | <- A + B + C + 2H bytes.
     ///                         +-->  +-----------+
     /// ```
+    ///
+    /// Note that only one of the surrounding is merged if the other one is not
+    /// free. Also, if the previous block is merged, then the address of the
+    /// current block changes. That's why we have to return a pointer to a
+    /// block.
     #[rustfmt::skip]
     unsafe fn merge_free_blocks_if_possible(
         &mut self,

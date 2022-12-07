@@ -7,6 +7,7 @@ use std::ptr::NonNull;
 mod allocator;
 mod block;
 mod bucket;
+mod freelist;
 mod header;
 mod list;
 mod mmap;
