@@ -77,10 +77,6 @@ use crate::{
 /// having to rely on macros to generate code for that. The only incovinience is
 /// that the free list points to content of free blocks instead of their header,
 /// but we can easily obtain the actual header.
-///
-/// I suggest that you check out the following commit, which doesn't have
-/// [`LinkedList<T>`], to understand why this method reduces boilerplate:
-/// [`37b7752e2daa6707c93cd7badfa85c168f09aac8`](https://github.com/antoniosarosi/memalloc-rust/blob/37b7752e2daa6707c93cd7badfa85c168f09aac8/src/mmap.rs#L649-L687)
 pub(crate) type FreeListNode = Node<()>;
 
 /// See [`FreeListNode`].
@@ -102,7 +98,7 @@ impl FreeList {
 
     /// Returns a reference to the block header of the first block in the free
     /// list. Not used internally, for now we only need it for testing.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub unsafe fn first_free_block(&self) -> Option<&Header<Block>> {
         self.first().and_then(|node| {
             let block = Header::<Block>::from_free_list_node(node);

@@ -9,11 +9,11 @@ pub(crate) struct Node<T> {
     pub data: T,
 }
 
-/// Custom linked list implementation for this allocator. This struct was
-/// created as an abstraction to reduce duplicated code, isolate some unsafe
-/// parts and reduce raw pointer usage. It makes the code harder to follow, so
-/// if you want a simpler version without this abstraction check this commit:
-/// [`37b7752e2daa6707c93cd7badfa85c168f09aac8`](https://github.com/antoniosarosi/memalloc-rust/blob/37b7752e2daa6707c93cd7badfa85c168f09aac8/src/mmap.rs)
+/// Custom linked list implementation for this allocator. Each
+/// [`crate::bucket::Bucket`] has to manage 3 linked list structures: list of
+/// regions (see [`crate::region::Region`]), list of blocks inside every region
+/// (see [`crate::block::Block`]) and list of free blocks (see
+/// [`crate::freelist`]). This struct is reused for all mentioned cases.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LinkedList<T> {
     head: Pointer<Node<T>>,
