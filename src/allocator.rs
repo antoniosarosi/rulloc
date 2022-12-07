@@ -70,6 +70,9 @@ struct InternalAllocator<const N: usize> {
 impl<const N: usize> InternalAllocator<N> {
     /// Builds a new allocator configured with the given bucket sizes.
     pub const fn with_bucket_sizes(sizes: [usize; N]) -> Self {
+        // Note that `Bucket::new()` is only called once and the result is
+        // cloned N times. That's not a problem because the bucket is empty,
+        // there are no pointers yet.
         InternalAllocator::<N> {
             sizes,
             buckets: [Bucket::new(); N],

@@ -325,7 +325,7 @@ impl Bucket {
         // Now this block is bigger.
         block.as_mut().data.size += next.as_ref().total_size();
 
-        // Next block doesn't exist any more.
+        // Next block doesn't exist anymore.
         block.as_mut().region_mut().data.blocks.remove(next);
     }
 }
