@@ -47,13 +47,87 @@ use crate::{
 /// +--------+------------------------+      ---------+-------------------------------------+
 /// ```
 ///
-/// However, there's a little catch. As you can see we use [`Node<()>`] to
-/// represent a node of the free list. That's because, first of all, we want to
-/// reuse the [`LinkedList<T>`] implementation. Secondly, there's no additional
-/// metadata associated to free blocks other than pointers to previous and next
-/// free blocks. All other data such as block size or region is located in the
-/// [`Node<Block>`] struct right above [`Node<()>`], as you can see in the
-/// memory representation.
+/// Also, note that the first free block doesn't have to be located in the
+/// first region, and the last free block doesn't have to be located in the last
+/// region either. Free blocks can be located anywhere. Consider this case:
+///
+/// 1. We get a new region from the kernel 4096 bytes in length.
+///
+/// 2. We create one single block in this region where we can allocate a maximum
+/// of 4096 - R - B bytes, where R = [`crate::region::REGION_HEADER_SIZE`] and
+/// B = [`crate::block::BLOCK_HEADER_SIZE`]. This would be the current state:
+///
+/// ```text
+///
+/// +--------+-------------------------------------+
+/// |        | +---------------------------------+ |
+/// | Region | |          Big Free Block         | |
+/// |        | +---------------------------------+ |
+/// +--------+-------------------------------------+
+///                             ^
+///                             |
+///                             +--- Head of the free list points to this block.
+///                                  Tail also points here (only one node).
+/// ```
+///
+/// 3. The block takes up all the space, if a subsequent allocation is smaller
+/// than the block size, then the block will be split in two different blocks
+/// and the second block will become the first and only free block.
+///
+/// ```text
+/// +--------+-------------------------------------+
+/// |        | +-------+    +--------------------+ |
+/// | Region | | Alloc | -> |        Free        | |
+/// |        | +-------+    +--------------------+ |
+/// +--------+-------------------------------------+
+///                                    ^
+///                                    |
+///                                    +--- Head and tail of the free list.
+/// ```
+///
+/// 4. If the user makes another allocation that is smaller than our free block,
+/// the splitting algorithm does its job again:
+///
+/// ```text
+/// +--------+-------------------------------------+
+/// |        | +-------+    +-------+    +-------+ |
+/// | Region | | Alloc | -> | Alloc | -> | Free  | |
+/// |        | +-------+    +-------+    +-------+ |
+/// +--------+-------------------------------------+
+///                                          ^
+///                                          |
+///                                          +--- Head and tail.
+/// ```
+///
+/// 5. Now the user deallocates the first block, se we have 2 free blocks:
+///
+/// ```text
+///                +-------------------------+
+///                |                         |
+/// +--------+-----|-------------------------|-----+
+/// |        | +---|---+    +-------+    +---|---+ |
+/// | Region | | Free  | -> | Alloc | -> | Free  | |
+/// |        | +-------+    +-------+    +-------+ |
+/// +--------+-------------------------------------+
+///                ^                         ^
+///                |                         |
+///                +--- Tail                 +--- Head
+/// ```
+///
+/// At this point, if the user makes another allocation that doesn't fit any of
+/// the two free blocks that we have we'll need to request another region, so
+/// the current tail will point to the new tail located in the new region.
+/// Because of this, we cannot make any assumptions regarding positioning when
+/// it comes to free blocks. All this process of splitting blocks, merging them
+/// again and updating the free list is handled at [`crate::allocator`].
+///
+/// Now, going back to the inernals of the free list, there's a little catch. As
+/// you can see we use [`Node<()>`] to represent a node of the free list. That's
+/// because, first of all, we want to reuse the [`LinkedList<T>`]
+/// implementation. Secondly, there's no additional metadata associated to free
+/// blocks other than pointers to previous and next free blocks. All other data
+/// such as block size or region is located in the [`Node<Block>`] struct right
+/// above [`Node<()>`], as you can see in the memory representation.
 ///
 /// The [`Node<T>`] type stores the pointers we need plus some other data, so if
 /// we give it a zero sized `T` we can reuse it for the free list without
