@@ -1,10 +1,10 @@
 use std::{
     alloc::{AllocError, Layout},
-    mem,
     ptr::NonNull,
 };
 
 use crate::{
+    alignment::POINTER_SIZE,
     block::{Block, BLOCK_HEADER_SIZE, MIN_BLOCK_SIZE},
     freelist::FreeList,
     header::Header,
@@ -13,9 +13,6 @@ use crate::{
     region::{determine_region_length, Region, REGION_HEADER_SIZE},
     Pointer,
 };
-
-/// Pointer size in bytes on the current machine.
-pub(crate) const POINTER_SIZE: usize = mem::size_of::<usize>();
 
 /// This, on itself, is actually a memory allocator. But we use multiple of
 /// them for optimization purposes. Basically, we can configure different
@@ -69,8 +66,8 @@ impl Bucket {
 
     /// Allocates a new block that can fit at least `layout.size()` bytes.
     /// Because of alignment and headers, it might allocate a bigger block than
-    /// needed. As long as no more than `layout.align()` bytes are written on
-    /// the content part of the block it should be fine.
+    /// needed. As long as no more than `layout.pad_to_align().size()` bytes are
+    /// written on the content part of the block it should be fine.
     pub unsafe fn allocate(&mut self, mut layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         layout = layout
             .align_to(POINTER_SIZE)

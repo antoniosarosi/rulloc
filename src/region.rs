@@ -129,11 +129,10 @@ pub(crate) unsafe fn determine_region_length(size: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alignment::POINTER_SIZE;
 
     #[test]
     fn region_length() {
-        use crate::bucket::POINTER_SIZE;
-
         unsafe {
             // Basic checks.
             assert_eq!(determine_region_length(POINTER_SIZE), page_size());

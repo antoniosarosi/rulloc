@@ -107,6 +107,23 @@ impl<const N: usize> InternalAllocator<N> {
 /// [`libc::mmap`] and some tricks and optimizations are implemented such as
 /// free list, block coalescing, block splitting and allocation buckets.
 pub struct MmapAllocator<const N: usize = 3> {
+    /// Currently we use a global [`Mutex`] to access the allocator, but here
+    /// are some ideas to further optimize multithreaded allocations:
+    ///
+    /// 1. Use one [`Mutex`] per [`Bucket`]. That way different size allocations
+    /// don't have to wait on each other. Note that reallocations might try to
+    /// "move" a pointer from one [`Bucket`] to another if the requested new
+    /// size changes drastically. If each [`Bucket`] has its own lock, we have
+    /// to handle deadlocks properly with [`Mutex::try_lock`].
+    ///
+    /// 2. Don't use any [`Mutex`] at all, have one entire allocator per thread.
+    /// Conceptually, we would need a mapping of [`std::thread::ThreadId`] to
+    /// [`InternalAllocator`]. Instead of using general data structures that
+    /// need to allocate memory, such as hash maps, we could use a fixed size
+    /// array and store a tuple of `(ThreadId, Bucket)`. Each allocation will
+    /// perform a linear scan to find the [`Bucket`] where we should allocate.
+    /// This is technically O(n) but as long as we don't have thousands of
+    /// threads it won't be an issue.
     allocator: Mutex<UnsafeCell<InternalAllocator<N>>>,
 }
 
@@ -321,7 +338,7 @@ mod tests {
 
                     // Miri is really slow, but we don't need as many operations
                     // to find bugs with it.
-                    let num_allocs = if cfg!(miri) { 20 } else { 4000 };
+                    let num_allocs = if cfg!(miri) { 20 } else { 2000 };
 
                     for layout in layouts {
                         barrier.wait();
@@ -344,10 +361,10 @@ mod tests {
                                 // If we're not using Miri then write all the
                                 // bytes and check them again later.
                                 for i in 0..layout.size() {
-                                    *addr.as_ptr().add(i) = i as u8;
+                                    *addr.as_ptr().add(i) = (i % 256) as u8;
                                 }
                                 for i in 0..layout.size() {
-                                    assert_eq!(*addr.as_ptr().add(i), i as u8);
+                                    assert_eq!(*addr.as_ptr().add(i), (i % 256) as u8);
                                 }
                             }
                             allocator.deallocate(addr, layout);

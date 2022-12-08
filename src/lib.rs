@@ -4,6 +4,7 @@
 
 use std::ptr::NonNull;
 
+mod alignment;
 mod allocator;
 mod block;
 mod bucket;
