@@ -44,10 +44,13 @@ impl<T> LinkedList<T> {
     }
 
     /// Number of elements in the list.
+    #[inline]
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// First element in the list.
+    #[inline]
     pub fn first(&self) -> Pointer<Header<T>> {
         self.head
     }
