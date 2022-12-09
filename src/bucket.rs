@@ -1,5 +1,6 @@
 use std::{
     alloc::{AllocError, Layout},
+    mem::ManuallyDrop,
     ptr::{self, NonNull},
 };
 
@@ -43,17 +44,17 @@ use crate::{
 /// ```
 pub(crate) struct Bucket {
     /// Free list.
-    free_blocks: FreeList,
+    free_blocks: ManuallyDrop<FreeList>,
     /// All regions mapped by this bucket.
-    regions: LinkedList<Region>,
+    regions: ManuallyDrop<LinkedList<Region>>,
 }
 
 impl Bucket {
     /// Builds a new empty [`Bucket`].
     pub const fn new() -> Self {
         Self {
-            free_blocks: FreeList::new(),
-            regions: LinkedList::new(),
+            free_blocks: ManuallyDrop::new(FreeList::new()),
+            regions: ManuallyDrop::new(LinkedList::new()),
         }
     }
 
@@ -184,16 +185,11 @@ impl Bucket {
     /// Returns the first free block in the free list or `None` if we didn't
     /// find any.
     unsafe fn find_free_block(&self, size: usize) -> Pointer<Header<Block>> {
-        let mut current = self.free_blocks.first();
-
-        while let Some(node) = current {
+        for node in &*self.free_blocks {
             let block = Header::<Block>::from_free_list_node(node);
-
             if block.as_ref().size() >= size {
                 return Some(block);
             }
-
-            current = node.as_ref().next;
         }
 
         None
@@ -342,6 +338,14 @@ impl Bucket {
 
         // Next block doesn't exist anymore.
         block.as_mut().region_mut().data.blocks.remove(next);
+    }
+}
+
+impl Drop for Bucket {
+    fn drop(&mut self) {
+        for region in &*self.regions {
+            unsafe { munmap(region.cast(), region.as_ref().total_size()) }
+        }
     }
 }
 

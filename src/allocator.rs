@@ -57,6 +57,13 @@ use crate::bucket::Bucket;
 /// time. This struct is not thread safe and it also needs mutable borrows to
 /// operate, so it has to be wrapped in [`UnsafeCell`] to satisfy
 /// [`std::alloc::Allocator`] trait. See [`MmapAllocator`] for the public API.
+///
+/// # Drop
+///
+/// This struct doesn't implement [`Drop`] because region unmapping is
+/// implemented by [`Bucket`]. If we don't implement [`Drop`], the compiler will
+/// just call [`Drop::drop`] on all the struct members one by one, so all the
+/// buckets will be dropped automatically.
 struct InternalAllocator<const N: usize> {
     /// Size of each bucket, in bytes.
     sizes: [usize; N],
@@ -155,19 +162,6 @@ impl Default for MmapAllocator {
         MmapAllocator::with_default_config()
     }
 }
-
-// impl<const N: usize> Drop for MmapAllocator<N> {
-//     fn drop(&mut self) {
-//         unsafe {
-//             if let Ok(lock) = self.allocator.lock() {
-//                 let allocator = &*lock.get();
-//                 for bucket in allocator.buckets {
-
-//                 }
-//             }
-//         }
-//     }
-// }
 
 unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {

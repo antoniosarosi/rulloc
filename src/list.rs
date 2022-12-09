@@ -24,6 +24,13 @@ pub(crate) struct LinkedList<T> {
     marker: PhantomData<T>,
 }
 
+/// Low level iterator for the linked list.
+pub(crate) struct Iter<T> {
+    current: Pointer<Node<T>>,
+    len: usize,
+    marker: PhantomData<T>,
+}
+
 impl<T> LinkedList<T> {
     /// Creates an empty linked list. No allocations happen because, well, we
     /// are the allocator.
@@ -139,6 +146,45 @@ impl<T> LinkedList<T> {
         }
 
         self.len -= 1;
+    }
+
+    /// Returns an iterator over the linked list elements. The values are
+    /// [`NonNull<Header<T>>`], we don't want to deal with moves and references
+    /// in this collection. This collection will never be dropped, the allocator
+    /// just calls [`libc::munmap`] to return memory regions back to the kernel.
+    /// See [`Drop`] implementation for [`crate::bucket::Bucket`].
+    pub fn iter(&self) -> Iter<T> {
+        Iter {
+            current: self.head,
+            len: self.len,
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Iterator for Iter<T> {
+    type Item = NonNull<Node<T>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.current.map(|node| unsafe {
+            self.current = node.as_ref().next;
+            self.len -= 1;
+            node
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len, Some(self.len))
+    }
+}
+
+impl<T> IntoIterator for &LinkedList<T> {
+    type Item = NonNull<Node<T>>;
+
+    type IntoIter = Iter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
