@@ -1,10 +1,10 @@
 use std::{
     alloc::{AllocError, Layout},
-    mem,
-    ptr::NonNull,
+    ptr::{self, NonNull},
 };
 
 use crate::{
+    alignment,
     block::{Block, BLOCK_HEADER_SIZE, MIN_BLOCK_SIZE},
     freelist::FreeList,
     header::Header,
@@ -13,9 +13,6 @@ use crate::{
     region::{determine_region_length, Region, REGION_HEADER_SIZE},
     Pointer,
 };
-
-/// Pointer size in bytes on the current machine.
-pub(crate) const POINTER_SIZE: usize = mem::size_of::<usize>();
 
 /// This, on itself, is actually a memory allocator. But we use multiple of
 /// them for optimization purposes. Basically, we can configure different
@@ -30,7 +27,7 @@ pub(crate) const POINTER_SIZE: usize = mem::size_of::<usize>();
 ///
 /// ```text
 ///                              Next Free Block                    Next Free Block
-///                  |------------------------------------+   +-----------------------+
+///                  +------------------------------------+   +-----------------------+
 ///                  |                                    |   |                       |
 /// +--------+-------|----------------+      +--------+---|---|-----------------------|-----+
 /// |        | +-----|-+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
@@ -69,19 +66,10 @@ impl Bucket {
 
     /// Allocates a new block that can fit at least `layout.size()` bytes.
     /// Because of alignment and headers, it might allocate a bigger block than
-    /// needed. As long as no more than `layout.align()` bytes are written on
-    /// the content part of the block it should be fine.
-    pub unsafe fn allocate(&mut self, mut layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        layout = layout
-            .align_to(POINTER_SIZE)
-            .or(Err(AllocError))?
-            .pad_to_align();
-
-        let size = if layout.size() >= MIN_BLOCK_SIZE {
-            layout.size()
-        } else {
-            MIN_BLOCK_SIZE
-        };
+    /// needed. As long as no more than `layout.pad_to_align().size()` bytes are
+    /// written on the content part of the block it should be fine.
+    pub unsafe fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let size = alignment::minimum_block_size_needed_for(layout);
 
         let free_block = match self.find_free_block(size) {
             Some(block) => block,
@@ -91,17 +79,20 @@ impl Bucket {
         self.split_free_block_if_possible(free_block, size);
         self.free_blocks.remove_block(free_block);
 
-        Ok(NonNull::slice_from_raw_parts(
-            Header::content_address_of(free_block),
-            free_block.as_ref().size(),
-        ))
+        let address = self.introduce_padding(free_block, layout.align());
+
+        Ok(address)
     }
 
     /// Deallocates the given pointer. Memory might not be returned to the OS
     /// if the region where `address` is located still contains used blocks.
     /// However, the freed block will be reused later if possible.
-    pub unsafe fn deallocate(&mut self, address: NonNull<u8>, _: Layout) {
-        let mut block = Header::<Block>::from_content_address(address);
+    pub unsafe fn deallocate(&mut self, address: NonNull<u8>, layout: Layout) {
+        let mut block = if layout.align() <= alignment::POINTER_SIZE {
+            Header::<Block>::from_content_address(address)
+        } else {
+            Header::<Block>::from_aligned_address(address)
+        };
 
         // This block is now free as it is about to be deallocated.
         self.free_blocks.append_block(block);
@@ -123,6 +114,31 @@ impl Bucket {
 
             munmap(region.cast(), region.as_ref().total_size());
         }
+    }
+
+    /// This function performs the algorithm described at
+    /// [`alignment::AlignmentBackPointer`]. The caller must guarantee that
+    /// the given block meets the size constraints needed to introduce enough
+    /// padding without overriding other headers. See
+    /// [`alignment::minimum_block_size_needed_for`].
+    unsafe fn introduce_padding(
+        &self,
+        block: NonNull<Header<Block>>,
+        align: usize,
+    ) -> NonNull<[u8]> {
+        let content_address = Header::content_address_of(block);
+
+        if align <= alignment::POINTER_SIZE {
+            return NonNull::slice_from_raw_parts(content_address, block.as_ref().size());
+        }
+
+        let next_aligned = alignment::next_aligned(content_address, align);
+
+        ptr::write(alignment::back_pointer_of(next_aligned).as_ptr(), block);
+
+        let padding = next_aligned.as_ptr().offset_from(content_address.as_ptr()) as usize;
+
+        return NonNull::slice_from_raw_parts(next_aligned, block.as_ref().size() - padding);
     }
 
     /// Requests a new memory region from the kernel where we can fit `size`
@@ -333,19 +349,22 @@ impl Bucket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::region::PAGE_SIZE;
+    use crate::{alignment::AlignmentBackPointer, region::PAGE_SIZE};
 
     #[test]
     fn regions_and_blocks() {
         unsafe {
             let mut bucket = Bucket::new();
 
+            // We'll use this later to check memory corruption. The allocator
+            // should not touch the content of any block.
+            let corruption_check = 69;
+
             // Request 1 byte, should call `mmap` with length of PAGE_SIZE.
             let first_layout = Layout::new::<u8>();
             let first_addr = bucket.allocate(first_layout).unwrap().cast::<u8>();
 
-            // We'll use this later to check memory corruption.
-            *first_addr.as_ptr() = 69;
+            *first_addr.as_ptr() = corruption_check;
 
             // First region should be PAGE_SIZE in length.
             let first_region = bucket.regions.first().unwrap();
@@ -383,7 +402,7 @@ mod tests {
 
             // We'll check corruption later.
             for _ in 0..second_layout.size() {
-                *second_addr.as_ptr() = 69;
+                *second_addr.as_ptr() = corruption_check;
             }
 
             // There are 3 blocks now, last one is still free.
@@ -400,7 +419,7 @@ mod tests {
             let third_addr = bucket.allocate(third_layout).unwrap().cast::<u8>();
 
             for _ in 0..third_layout.size() {
-                *third_addr.as_ptr() = 69;
+                *third_addr.as_ptr() = corruption_check;
             }
 
             // Number of blocks hasn't changed, but we don't have free blocks
@@ -409,12 +428,12 @@ mod tests {
             assert_eq!(bucket.free_blocks.len(), 0);
 
             // Time for checking memory corruption
-            assert_eq!(*first_addr.as_ptr(), 69);
+            assert_eq!(*first_addr.as_ptr(), corruption_check);
             for _ in 0..second_layout.size() {
-                assert_eq!(*second_addr.as_ptr(), 69);
+                assert_eq!(*second_addr.as_ptr(), corruption_check);
             }
             for _ in 0..third_layout.size() {
-                assert_eq!(*third_addr.as_ptr(), 69);
+                assert_eq!(*third_addr.as_ptr(), corruption_check);
             }
 
             // Let's request a bigger chunk so that a new region is used.
@@ -422,7 +441,7 @@ mod tests {
             let fourth_addr = bucket.allocate(fourth_layout).unwrap().cast::<u8>();
 
             for _ in 0..fourth_layout.size() {
-                *fourth_addr.as_ptr() = 69;
+                *fourth_addr.as_ptr() = corruption_check;
             }
 
             // We should have a new region and a new free block now.
@@ -454,13 +473,108 @@ mod tests {
 
             // Check mem corruption in the last block
             for _ in 0..fourth_layout.size() {
-                assert_eq!(*fourth_addr.as_ptr(), 69);
+                assert_eq!(*fourth_addr.as_ptr(), corruption_check);
             }
 
             // Deallocating fourh address should unmap the last region.
             bucket.deallocate(fourth_addr, fourth_layout);
             assert_eq!(bucket.regions.len(), 0);
             assert_eq!(bucket.free_blocks.len(), 0);
+        }
+    }
+
+    unsafe fn allocate_aligned(
+        bucket: &mut Bucket,
+        size: usize,
+        align: usize,
+        corruption_check: u8,
+    ) -> (NonNull<u8>, Layout) {
+        let layout = Layout::from_size_align(size, align).unwrap();
+        let addr = bucket.allocate(layout).unwrap().cast::<u8>();
+
+        // We are not actually performing aligned memory accesses,
+        // but it doesn't matter, we just wanna check that we can
+        // write to the requested memory and we don't seg fault.
+        // We're not writing the entire layout when using Miri
+        // because it's too slow, we'll just write to the addresses
+        // that might cause problems, and Miri wll catch bugs or
+        // undefined behaviour.
+        if cfg!(miri) {
+            *addr.as_ptr() = corruption_check;
+            *addr.as_ptr().add(size / 2) = corruption_check;
+            *addr.as_ptr().add(size - 1) = corruption_check;
+        } else {
+            for offset in 0..size {
+                *addr.as_ptr().add(offset) = corruption_check;
+            }
+        }
+
+        assert_eq!(addr.cast::<u8>().as_ptr() as usize % align, 0);
+
+        (addr, layout)
+    }
+
+    unsafe fn deallocate_aligned(
+        bucket: &mut Bucket,
+        aligned_alloc: (NonNull<u8>, Layout),
+        corruption_check: u8,
+    ) {
+        let (addr, layout) = aligned_alloc;
+        if cfg!(miri) {
+            assert_eq!(*addr.as_ptr(), corruption_check);
+            assert_eq!(*addr.as_ptr().add(layout.size() / 2), corruption_check);
+            assert_eq!(*addr.as_ptr().add(layout.size() - 1), corruption_check);
+        } else {
+            for offset in 0..layout.size() {
+                assert_eq!(*addr.as_ptr().add(offset), corruption_check);
+            }
+        }
+        bucket.deallocate(addr, layout);
+    }
+
+    #[test]
+    fn alignment() {
+        unsafe {
+            let mut bucket = Bucket::new();
+
+            let layout = Layout::from_size_align(1, 16).unwrap();
+            let address = bucket.allocate(layout).unwrap().cast::<u8>();
+
+            assert_eq!(address.as_ptr() as usize % 16, 0);
+
+            // Basic back pointer check
+            let first_block = bucket.regions.first().unwrap().as_ref().first_block();
+            let back_ptr = address.cast::<AlignmentBackPointer>().as_ptr().offset(-1);
+            assert_eq!(*back_ptr, first_block);
+
+            bucket.deallocate(address, layout);
+
+            let alignments = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
+            let sizes = [1, 2, 4, 8, 10, 20, 512, 1000, 2048, 4096];
+            let mut allocations = [(NonNull::dangling(), Layout::new::<u8>()); 10];
+            let corruption_check = 69;
+
+            // Multiple allocations of same alignment.
+            for align in alignments {
+                for (i, size) in sizes.iter().enumerate() {
+                    allocations[i] = allocate_aligned(&mut bucket, *size, align, corruption_check);
+                }
+                for allocation in allocations {
+                    deallocate_aligned(&mut bucket, allocation, corruption_check)
+                }
+            }
+            assert_eq!(bucket.regions().len(), 0);
+
+            // Multiple allocations of different alignment.
+            for size in sizes {
+                for (i, align) in alignments.iter().enumerate() {
+                    allocations[i] = allocate_aligned(&mut bucket, size, *align, corruption_check);
+                }
+                for allocation in allocations {
+                    deallocate_aligned(&mut bucket, allocation, corruption_check)
+                }
+            }
+            assert_eq!(bucket.regions().len(), 0);
         }
     }
 }

@@ -17,12 +17,14 @@ pub(crate) static mut PAGE_SIZE: usize = 0;
 /// [`libc::sysconf`], so we'll call that function once and then mutate a global
 /// variable to reuse it.
 #[inline]
-pub(crate) unsafe fn page_size() -> usize {
-    if PAGE_SIZE == 0 {
-        PAGE_SIZE = libc::sysconf(libc::_SC_PAGE_SIZE) as usize
-    }
+pub(crate) fn page_size() -> usize {
+    unsafe {
+        if PAGE_SIZE == 0 {
+            PAGE_SIZE = libc::sysconf(libc::_SC_PAGE_SIZE) as usize
+        }
 
-    PAGE_SIZE
+        PAGE_SIZE
+    }
 }
 
 /// Memory region specific data. All headers are also linked lists nodes, see
@@ -57,21 +59,25 @@ impl Header<Region> {
     /// # Safety
     ///
     /// There is **ALWAYS** at least one block in the region.
+    #[inline]
     pub unsafe fn first_block(&self) -> NonNull<Header<Block>> {
         self.data.blocks.first().unwrap_unchecked()
     }
 
     /// Region size excluding [`REGION_HEADER_SIZE`].
+    #[inline]
     pub fn size(&self) -> usize {
         self.data.size
     }
 
     /// Region size including [`REGION_HEADER_SIZE`].
+    #[inline]
     pub fn total_size(&self) -> usize {
         REGION_HEADER_SIZE + self.data.size
     }
 
     /// Number of blocks in this region.
+    #[inline]
     pub fn num_blocks(&self) -> usize {
         self.data.blocks.len()
     }
@@ -85,7 +91,7 @@ impl Header<Region> {
 /// * `size` - Amount of bytes that need to be allocated without including
 /// any header. This value must be **already aligned**.
 ///
-pub(crate) unsafe fn determine_region_length(size: usize) -> usize {
+pub(crate) fn determine_region_length(size: usize) -> usize {
     // We'll store at least one block in this region, so we need space for
     // region header, block header and user content.
     let total_size = REGION_HEADER_SIZE + BLOCK_HEADER_SIZE + size;
@@ -129,11 +135,10 @@ pub(crate) unsafe fn determine_region_length(size: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alignment::POINTER_SIZE;
 
     #[test]
     fn region_length() {
-        use crate::bucket::POINTER_SIZE;
-
         unsafe {
             // Basic checks.
             assert_eq!(determine_region_length(POINTER_SIZE), page_size());

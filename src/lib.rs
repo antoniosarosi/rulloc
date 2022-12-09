@@ -1,9 +1,12 @@
 #![feature(allocator_api)]
+#![feature(alloc_layout_extra)]
 #![feature(is_some_and)]
 #![feature(nonnull_slice_from_raw_parts)]
+#![feature(strict_provenance)]
 
 use std::ptr::NonNull;
 
+mod alignment;
 mod allocator;
 mod block;
 mod bucket;
