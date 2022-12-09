@@ -1,7 +1,7 @@
 use memalloc::MmapAllocator;
 
-// NOTE: This example doesn't work with Miri because we use the globall alocator
-// to simulate `mmap` calls when `cfg!(miri)`. If we are the globall allocator,
+// NOTE: This example doesn't work with Miri because we use the global alocator
+// to simulate `mmap` calls when `cfg!(miri)`. If we are the global allocator,
 // there are two problems:
 //
 // 1. We cannot do FFI calls when using Miri, so no `mmap`. That's why we
