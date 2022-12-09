@@ -204,6 +204,11 @@ pub(crate) const POINTER_SIZE: usize = mem::size_of::<usize>();
 /// addresses by 2.
 pub(crate) type AlignmentBackPointer = NonNull<Header<Block>>;
 
+/// Returns a pointer to the [`AlignmentBackPointer`] of the given `address`.
+pub(crate) unsafe fn back_pointer_of(address: NonNull<u8>) -> NonNull<AlignmentBackPointer> {
+    NonNull::new_unchecked(address.cast::<AlignmentBackPointer>().as_ptr().offset(-1))
+}
+
 /// Returns the minimum block size that allows the methods described at
 /// [`AlignmentBackPointer`] to be successfully implemented.
 pub(crate) fn minimum_block_size_needed_for(layout: Layout) -> usize {

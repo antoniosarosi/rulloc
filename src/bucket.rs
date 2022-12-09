@@ -87,8 +87,12 @@ impl Bucket {
     /// Deallocates the given pointer. Memory might not be returned to the OS
     /// if the region where `address` is located still contains used blocks.
     /// However, the freed block will be reused later if possible.
-    pub unsafe fn deallocate(&mut self, address: NonNull<u8>, _: Layout) {
-        let mut block = Header::<Block>::from_content_address(address);
+    pub unsafe fn deallocate(&mut self, address: NonNull<u8>, layout: Layout) {
+        let mut block = if layout.align() <= alignment::POINTER_SIZE {
+            Header::<Block>::from_content_address(address)
+        } else {
+            Header::<Block>::from_aligned_address(address)
+        };
 
         // This block is now free as it is about to be deallocated.
         self.free_blocks.append_block(block);
@@ -130,11 +134,7 @@ impl Bucket {
 
         let next_aligned = alignment::next_aligned(content_address, align);
 
-        let back_pointer = next_aligned
-            .cast::<alignment::AlignmentBackPointer>()
-            .as_ptr()
-            .offset(-1);
-
+        let back_pointer = alignment::back_pointer_of(next_aligned).as_ptr();
         *back_pointer = block;
 
         let padding = next_aligned.as_ptr().offset_from(content_address.as_ptr()) as usize;

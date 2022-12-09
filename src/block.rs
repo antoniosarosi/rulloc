@@ -1,6 +1,6 @@
 use std::{mem, ptr::NonNull};
 
-use crate::{freelist::FreeListNode, header::Header, region::Region};
+use crate::{alignment, freelist::FreeListNode, header::Header, region::Region};
 
 /// Minimum block size in bytes. Read the documentation of the data structures
 /// used for this allocator to understand why it has this value. Specifically,
@@ -73,6 +73,12 @@ impl Header<Block> {
     /// previously deallocated (use after free).
     pub unsafe fn from_free_list_node(links: NonNull<FreeListNode>) -> NonNull<Self> {
         Self::from_content_address(links.cast())
+    }
+
+    /// See [`crate::alignment::AlignmentBackPointer`].
+    pub unsafe fn from_aligned_address(address: NonNull<u8>) -> NonNull<Self> {
+        let back_pointer = alignment::back_pointer_of(address).as_ptr();
+        *back_pointer
     }
 
     /// Returns a mutable reference to the region that contains this block.
