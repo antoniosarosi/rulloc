@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    alignment::POINTER_SIZE,
+    alignment,
     block::{Block, BLOCK_HEADER_SIZE, MIN_BLOCK_SIZE},
     freelist::FreeList,
     header::Header,
@@ -68,17 +68,8 @@ impl Bucket {
     /// Because of alignment and headers, it might allocate a bigger block than
     /// needed. As long as no more than `layout.pad_to_align().size()` bytes are
     /// written on the content part of the block it should be fine.
-    pub unsafe fn allocate(&mut self, mut layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        layout = layout
-            .align_to(POINTER_SIZE)
-            .or(Err(AllocError))?
-            .pad_to_align();
-
-        let size = if layout.size() >= MIN_BLOCK_SIZE {
-            layout.size()
-        } else {
-            MIN_BLOCK_SIZE
-        };
+    pub unsafe fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let size = alignment::minimum_block_size_needed_for(layout);
 
         let free_block = match self.find_free_block(size) {
             Some(block) => block,
@@ -88,10 +79,9 @@ impl Bucket {
         self.split_free_block_if_possible(free_block, size);
         self.free_blocks.remove_block(free_block);
 
-        Ok(NonNull::slice_from_raw_parts(
-            Header::content_address_of(free_block),
-            free_block.as_ref().size(),
-        ))
+        let address = self.introduce_padding(free_block, layout.align());
+
+        Ok(address)
     }
 
     /// Deallocates the given pointer. Memory might not be returned to the OS
@@ -120,6 +110,36 @@ impl Bucket {
 
             munmap(region.cast(), region.as_ref().total_size());
         }
+    }
+
+    /// This function performs the algorithm described at
+    /// [`alignment::AlignmentBackPointer`]. The caller must guarantee that
+    /// the given block meets the size constraints needed to introduce enough
+    /// padding without overriding other headers. See
+    /// [`alignment::minimum_block_size_needed_for`].
+    unsafe fn introduce_padding(
+        &self,
+        block: NonNull<Header<Block>>,
+        align: usize,
+    ) -> NonNull<[u8]> {
+        let content_address = Header::content_address_of(block);
+
+        if align <= alignment::POINTER_SIZE {
+            return NonNull::slice_from_raw_parts(content_address, block.as_ref().size());
+        }
+
+        let next_aligned = alignment::next_aligned(content_address, align);
+
+        let back_pointer = next_aligned
+            .cast::<alignment::AlignmentBackPointer>()
+            .as_ptr()
+            .offset(-1);
+
+        *back_pointer = block;
+
+        let padding = next_aligned.as_ptr().offset_from(content_address.as_ptr()) as usize;
+
+        return NonNull::slice_from_raw_parts(next_aligned, block.as_ref().size() - padding);
     }
 
     /// Requests a new memory region from the kernel where we can fit `size`
