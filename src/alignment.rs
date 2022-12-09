@@ -124,7 +124,7 @@ pub(crate) const POINTER_SIZE: usize = mem::size_of::<usize>();
 ///                        +----------------------------+      |
 ///                   0x21 | padding (struct alignment) |  <---+
 ///                        +----------------------------+
-///  Content addr ->  0x28 |       Padding bytes        |  <---+      <---+
+///   Content addr -> 0x28 |       Padding bytes        |  <---+      <---+
 ///                        +----------------------------+      |          |
 ///                   0x30 |       Padding bytes        |      | Padding  |
 ///                        +----------------------------+      |          |

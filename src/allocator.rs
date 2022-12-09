@@ -63,7 +63,7 @@ struct InternalAllocator<const N: usize> {
     sizes: [usize; N],
     /// Fixed size buckets.
     buckets: [Bucket; N],
-    /// Any allocation request of size > sizes[N - 1] will use this bucket.
+    /// Any allocation request of `size > sizes[N - 1]` will use this bucket.
     dyn_bucket: Bucket,
 }
 
@@ -99,6 +99,9 @@ impl<const N: usize> InternalAllocator<N> {
 
     /// Deallocates the memory block at `address`.
     pub unsafe fn deallocate(&mut self, address: NonNull<u8>, layout: Layout) {
+        // We can find the bucket that has allocated the pointer because we also
+        // know the layout. If the API of the trait changes, we should store a
+        // pointer to the bucket in every region.
         self.dispatch(layout).deallocate(address, layout)
     }
 }
@@ -123,7 +126,8 @@ pub struct MmapAllocator<const N: usize = 3> {
     /// array and store a tuple of `(ThreadId, Bucket)`. Each allocation will
     /// perform a linear scan to find the [`Bucket`] where we should allocate.
     /// This is technically O(n) but as long as we don't have thousands of
-    /// threads it won't be an issue.
+    /// threads it won't be an issue. If we end up needing to allocate
+    /// memory for ourselves, we can just use [`crate::mmap`].
     allocator: Mutex<UnsafeCell<InternalAllocator<N>>>,
 }
 
