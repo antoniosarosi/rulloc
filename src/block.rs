@@ -51,7 +51,6 @@ pub(crate) const BLOCK_HEADER_SIZE: usize = mem::size_of::<Header<Block>>();
 /// for a detailed explanation. Also note that if a block is free (not
 /// currently used by the caller) we take advantage of the fact that we can
 /// put anything we want in the block content. See [`crate::freelist`].
-#[derive(Clone, Copy, Debug)]
 pub(crate) struct Block {
     /// Memory region where this block is located.
     pub region: NonNull<Header<Region>>,

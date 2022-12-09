@@ -41,7 +41,6 @@ use crate::{
 ///     +--- regions.head                         +--- regions.tail
 ///
 /// ```
-#[derive(Clone, Copy, Debug)]
 pub(crate) struct Bucket {
     /// Free list.
     free_blocks: FreeList,

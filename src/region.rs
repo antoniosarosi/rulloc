@@ -45,7 +45,6 @@ pub(crate) fn page_size() -> usize {
 /// |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
 /// +--------+------------------------+      ---------+-------------------------------------+
 /// ```
-#[derive(Clone, Copy, Debug)]
 pub(crate) struct Region {
     /// Blocks contained within this memory region.
     pub blocks: LinkedList<Block>,

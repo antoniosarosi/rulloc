@@ -17,7 +17,6 @@ pub(crate) struct Node<T> {
 /// regions (see [`crate::region::Region`]), list of blocks inside every region
 /// (see [`crate::block::Block`]) and list of free blocks (see
 /// [`crate::freelist`]). This struct is reused for all mentioned cases.
-#[derive(Clone, Copy, Debug)]
 pub(crate) struct LinkedList<T> {
     head: Pointer<Node<T>>,
     tail: Pointer<Node<T>>,

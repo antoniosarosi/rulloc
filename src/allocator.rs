@@ -57,7 +57,6 @@ use crate::bucket::Bucket;
 /// time. This struct is not thread safe and it also needs mutable borrows to
 /// operate, so it has to be wrapped in [`UnsafeCell`] to satisfy
 /// [`std::alloc::Allocator`] trait. See [`MmapAllocator`] for the public API.
-#[derive(Debug)]
 struct InternalAllocator<const N: usize> {
     /// Size of each bucket, in bytes.
     sizes: [usize; N],
@@ -70,12 +69,10 @@ struct InternalAllocator<const N: usize> {
 impl<const N: usize> InternalAllocator<N> {
     /// Builds a new allocator configured with the given bucket sizes.
     pub const fn with_bucket_sizes(sizes: [usize; N]) -> Self {
-        // Note that `Bucket::new()` is only called once and the result is
-        // cloned N times. That's not a problem because the bucket is empty,
-        // there are no pointers yet.
+        const BUCKET: Bucket = Bucket::new();
         InternalAllocator::<N> {
             sizes,
-            buckets: [Bucket::new(); N],
+            buckets: [BUCKET; N],
             dyn_bucket: Bucket::new(),
         }
     }
@@ -158,6 +155,19 @@ impl Default for MmapAllocator {
         MmapAllocator::with_default_config()
     }
 }
+
+// impl<const N: usize> Drop for MmapAllocator<N> {
+//     fn drop(&mut self) {
+//         unsafe {
+//             if let Ok(lock) = self.allocator.lock() {
+//                 let allocator = &*lock.get();
+//                 for bucket in allocator.buckets {
+
+//                 }
+//             }
+//         }
+//     }
+// }
 
 unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
