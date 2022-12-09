@@ -33,6 +33,8 @@ use crate::{
 /// +----------------------------+
 /// ```
 ///
+/// # Free blocks positioning
+///
 /// Free blocks may point to blocks located in different regions, since _all_
 /// free blocks are linked. See this representation:
 ///
@@ -121,6 +123,8 @@ use crate::{
 /// it comes to free blocks. All this process of splitting blocks, merging them
 /// again and updating the free list is handled at [`crate::allocator`].
 ///
+/// # Free list implementation
+///
 /// Now, going back to the inernals of the free list, there's a little catch. As
 /// you can see we use [`Node<()>`] to represent a node of the free list. That's
 /// because, first of all, we want to reuse the [`LinkedList<T>`]
@@ -151,6 +155,16 @@ use crate::{
 /// having to rely on macros to generate code for that. The only incovinience is
 /// that the free list points to content of free blocks instead of their header,
 /// but we can easily obtain the actual header.
+///
+/// Note that generally we never store pointers to the contents of a block
+/// because the user also has pointers to those addresses, so we don't want
+/// aliasing because that would probably cause issues with references. However,
+/// if a block has been deallocated, we can actually point to its content
+/// because the user doesn't have pointers to the content address anymore, all
+/// of them should have been dropped. If users still maintain pointers to
+/// deallocated addresses they will run into use after free, so they better not
+/// use such pointers! For finding bugs related to this kind of problems,
+/// [Miri](https://github.com/rust-lang/miri) is really helpful.
 pub(crate) type FreeListNode = Node<()>;
 
 /// See [`FreeListNode`].

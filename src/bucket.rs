@@ -1,6 +1,6 @@
 use std::{
     alloc::{AllocError, Layout},
-    ptr::NonNull,
+    ptr::{self, NonNull},
 };
 
 use crate::{
@@ -27,7 +27,7 @@ use crate::{
 ///
 /// ```text
 ///                              Next Free Block                    Next Free Block
-///                  |------------------------------------+   +-----------------------+
+///                  +------------------------------------+   +-----------------------+
 ///                  |                                    |   |                       |
 /// +--------+-------|----------------+      +--------+---|---|-----------------------|-----+
 /// |        | +-----|-+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
@@ -134,8 +134,7 @@ impl Bucket {
 
         let next_aligned = alignment::next_aligned(content_address, align);
 
-        let back_pointer = alignment::back_pointer_of(next_aligned).as_ptr();
-        *back_pointer = block;
+        ptr::write(alignment::back_pointer_of(next_aligned).as_ptr(), block);
 
         let padding = next_aligned.as_ptr().offset_from(content_address.as_ptr()) as usize;
 
@@ -350,19 +349,22 @@ impl Bucket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::region::PAGE_SIZE;
+    use crate::{alignment::AlignmentBackPointer, region::PAGE_SIZE};
 
     #[test]
     fn regions_and_blocks() {
         unsafe {
             let mut bucket = Bucket::new();
 
+            // We'll use this later to check memory corruption. The allocator
+            // should not touch the content of any block.
+            let corruption_check = 69;
+
             // Request 1 byte, should call `mmap` with length of PAGE_SIZE.
             let first_layout = Layout::new::<u8>();
             let first_addr = bucket.allocate(first_layout).unwrap().cast::<u8>();
 
-            // We'll use this later to check memory corruption.
-            *first_addr.as_ptr() = 69;
+            *first_addr.as_ptr() = corruption_check;
 
             // First region should be PAGE_SIZE in length.
             let first_region = bucket.regions.first().unwrap();
@@ -400,7 +402,7 @@ mod tests {
 
             // We'll check corruption later.
             for _ in 0..second_layout.size() {
-                *second_addr.as_ptr() = 69;
+                *second_addr.as_ptr() = corruption_check;
             }
 
             // There are 3 blocks now, last one is still free.
@@ -417,7 +419,7 @@ mod tests {
             let third_addr = bucket.allocate(third_layout).unwrap().cast::<u8>();
 
             for _ in 0..third_layout.size() {
-                *third_addr.as_ptr() = 69;
+                *third_addr.as_ptr() = corruption_check;
             }
 
             // Number of blocks hasn't changed, but we don't have free blocks
@@ -426,12 +428,12 @@ mod tests {
             assert_eq!(bucket.free_blocks.len(), 0);
 
             // Time for checking memory corruption
-            assert_eq!(*first_addr.as_ptr(), 69);
+            assert_eq!(*first_addr.as_ptr(), corruption_check);
             for _ in 0..second_layout.size() {
-                assert_eq!(*second_addr.as_ptr(), 69);
+                assert_eq!(*second_addr.as_ptr(), corruption_check);
             }
             for _ in 0..third_layout.size() {
-                assert_eq!(*third_addr.as_ptr(), 69);
+                assert_eq!(*third_addr.as_ptr(), corruption_check);
             }
 
             // Let's request a bigger chunk so that a new region is used.
@@ -439,7 +441,7 @@ mod tests {
             let fourth_addr = bucket.allocate(fourth_layout).unwrap().cast::<u8>();
 
             for _ in 0..fourth_layout.size() {
-                *fourth_addr.as_ptr() = 69;
+                *fourth_addr.as_ptr() = corruption_check;
             }
 
             // We should have a new region and a new free block now.
@@ -471,13 +473,108 @@ mod tests {
 
             // Check mem corruption in the last block
             for _ in 0..fourth_layout.size() {
-                assert_eq!(*fourth_addr.as_ptr(), 69);
+                assert_eq!(*fourth_addr.as_ptr(), corruption_check);
             }
 
             // Deallocating fourh address should unmap the last region.
             bucket.deallocate(fourth_addr, fourth_layout);
             assert_eq!(bucket.regions.len(), 0);
             assert_eq!(bucket.free_blocks.len(), 0);
+        }
+    }
+
+    unsafe fn allocate_aligned(
+        bucket: &mut Bucket,
+        size: usize,
+        align: usize,
+        corruption_check: u8,
+    ) -> (NonNull<u8>, Layout) {
+        let layout = Layout::from_size_align(size, align).unwrap();
+        let addr = bucket.allocate(layout).unwrap().cast::<u8>();
+
+        // We are not actually performing aligned memory accesses,
+        // but it doesn't matter, we just wanna check that we can
+        // write to the requested memory and we don't seg fault.
+        // We're not writing the entire layout when using Miri
+        // because it's too slow, we'll just write to the addresses
+        // that might cause problems, and Miri wll catch bugs or
+        // undefined behaviour.
+        if cfg!(miri) {
+            *addr.as_ptr() = corruption_check;
+            *addr.as_ptr().add(size / 2) = corruption_check;
+            *addr.as_ptr().add(size - 1) = corruption_check;
+        } else {
+            for offset in 0..size {
+                *addr.as_ptr().add(offset) = corruption_check;
+            }
+        }
+
+        assert_eq!(addr.cast::<u8>().as_ptr() as usize % align, 0);
+
+        (addr, layout)
+    }
+
+    unsafe fn deallocate_aligned(
+        bucket: &mut Bucket,
+        aligned_alloc: (NonNull<u8>, Layout),
+        corruption_check: u8,
+    ) {
+        let (addr, layout) = aligned_alloc;
+        if cfg!(miri) {
+            assert_eq!(*addr.as_ptr(), corruption_check);
+            assert_eq!(*addr.as_ptr().add(layout.size() / 2), corruption_check);
+            assert_eq!(*addr.as_ptr().add(layout.size() - 1), corruption_check);
+        } else {
+            for offset in 0..layout.size() {
+                assert_eq!(*addr.as_ptr().add(offset), corruption_check);
+            }
+        }
+        bucket.deallocate(addr, layout);
+    }
+
+    #[test]
+    fn alignment() {
+        unsafe {
+            let mut bucket = Bucket::new();
+
+            let layout = Layout::from_size_align(1, 16).unwrap();
+            let address = bucket.allocate(layout).unwrap().cast::<u8>();
+
+            assert_eq!(address.as_ptr() as usize % 16, 0);
+
+            // Basic back pointer check
+            let first_block = bucket.regions.first().unwrap().as_ref().first_block();
+            let back_ptr = address.cast::<AlignmentBackPointer>().as_ptr().offset(-1);
+            assert_eq!(*back_ptr, first_block);
+
+            bucket.deallocate(address, layout);
+
+            let alignments = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
+            let sizes = [1, 2, 4, 8, 10, 20, 512, 1000, 2048, 4096];
+            let mut allocations = [(NonNull::dangling(), Layout::new::<u8>()); 10];
+            let corruption_check = 69;
+
+            // Multiple allocations of same alignment.
+            for align in alignments {
+                for (i, size) in sizes.iter().enumerate() {
+                    allocations[i] = allocate_aligned(&mut bucket, *size, align, corruption_check);
+                }
+                for allocation in allocations {
+                    deallocate_aligned(&mut bucket, allocation, corruption_check)
+                }
+            }
+            assert_eq!(bucket.regions().len(), 0);
+
+            // Multiple allocations of different alignment.
+            for size in sizes {
+                for (i, align) in alignments.iter().enumerate() {
+                    allocations[i] = allocate_aligned(&mut bucket, size, *align, corruption_check);
+                }
+                for allocation in allocations {
+                    deallocate_aligned(&mut bucket, allocation, corruption_check)
+                }
+            }
+            assert_eq!(bucket.regions().len(), 0);
         }
     }
 }

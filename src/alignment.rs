@@ -158,8 +158,40 @@ pub(crate) const POINTER_SIZE: usize = mem::size_of::<usize>();
 /// 24 bytes, which gives us the address 64 or `0x40` in hex. This address is
 /// 32-aligned and can fit 96 bytes for sure because we've only added 24 bytes
 /// of padding and the block can fit 96 + 32 in total. Also, note that the
-/// ammount of padding includes space for the back pointer. The back pointer
-/// itself is part of the padding.
+/// amount of padding includes space for the back pointer. The back pointer
+/// itself is part of the padding. That's why we've showed a 32-aligned example
+/// first because this is how 16-aligned looks like given the same block
+/// address:
+///
+/// ```text
+///                        +----------------------------+
+/// Header address -> 0x00 | pointer to next block      |  <---+
+///                        +----------------------------+      |
+///                   0x08 | pointer to prev block      |      |
+///                        +----------------------------+      |
+///                   0x10 | pointer to block region    |      |
+///                        +----------------------------+      | <Header<Block>>
+///                   0x18 | block size                 |      |
+///                        +----------------------------+      |
+///                   0x20 | is free flag (1 byte)      |      |
+///                        +----------------------------+      |
+///                   0x21 | padding (struct alignment) |  <---+
+///                        +----------------------------+
+///   Back pointer -> 0x28 | 0x00 (Header struct addr)  |  <--- This address is
+///                        +----------------------------+       the content
+///   User pointer -> 0x30 |        User content        |       address, padding
+///                        +----------------------------+       and back pointer
+///                        |            ...             |       at the same time
+///                        |            ...             |
+///                        |            ...             |
+///                        +----------------------------+
+/// ```
+///
+/// Notice how `0x28` (40 in decimal) stores 8 bytes of padding and also the
+/// back pointer. The address `0x30` (48 in decimal) is the first address
+/// aligned to 16, and that should be the user poiner.
+///
+/// # Padding
 ///
 /// The exact padding that we need to add to an 8-aligned address to obtain a
 /// new address that meets the requirements depends on the requested alignment.
@@ -205,6 +237,7 @@ pub(crate) const POINTER_SIZE: usize = mem::size_of::<usize>();
 pub(crate) type AlignmentBackPointer = NonNull<Header<Block>>;
 
 /// Returns a pointer to the [`AlignmentBackPointer`] of the given `address`.
+#[inline]
 pub(crate) unsafe fn back_pointer_of(address: NonNull<u8>) -> NonNull<AlignmentBackPointer> {
     NonNull::new_unchecked(address.cast::<AlignmentBackPointer>().as_ptr().offset(-1))
 }
@@ -230,7 +263,7 @@ pub(crate) fn minimum_block_size_needed_for(layout: Layout) -> usize {
     // that `2 * POINTER_SIZE == MIN_BLOCK_SIZE` because we use free blocks to
     // store 2 pointers for the freelist. So this could actually be an else
     // statement instead, but we'll leave it as an if statement in case we
-    //increase `MIN_BLOCK_SIZE`.
+    // increase `MIN_BLOCK_SIZE`.
     if size < MIN_BLOCK_SIZE {
         size = MIN_BLOCK_SIZE;
     }
@@ -242,258 +275,18 @@ pub(crate) fn minimum_block_size_needed_for(layout: Layout) -> usize {
 /// alignment. The received address is never returned because the method
 /// described at [`AlignmentBackPointer`] doesn't work if the address is
 /// exactly the content address of a block.
-///
-/// # Implmentation Notes
-///
-/// This function could by implemented like so:
-///
-/// ```rust
-/// fn basic_impl(address: usize, align: usize) -> usize {
-///     let remainder = address % align;
-///     address - remainder + align
-/// }
-///
-/// // If we start at 24, next address aligned to 32 is 32.
-/// assert_eq!(basic_impl(24, 32), 32);
-///
-/// // Remember that we never return the address we start at even if it's
-/// // already aligned because we need space for the back pointer.
-/// assert_eq!(basic_impl(8, 8), 16);
-///
-/// // More examples.
-/// assert_eq!(basic_impl(1008, 8), 1016);
-/// assert_eq!(basic_impl(0x18, 8), 0x20);
-/// ```
-///
-/// But since divisions are slow, and in this case unnecessary, we'll do some
-/// bit magic instead.
-///
-/// # Bit Magic
-///
-/// `align` is guaranteed to be a power of 2, so in binary it will always have a
-/// 1 at some bit position while all the rest of bits are 0:
-///
-/// ```rust
-/// assert_eq!(2, 0b0010);
-/// assert_eq!(4, 0b0100);
-/// assert_eq!(8, 0b1000);
-/// ```
-///
-/// Let's call the bit position that equals 1 `P`. All powers of two have their
-/// own P, so an address A is aligned to a power of two if the bits after P in A
-/// are equal to 0. Consider the address `0x18`, this address is 8-aligned
-/// because 8 in binary is `0000 1000` while `0x18` is `0001 1000`:
-///
-/// ```text
-///                +--- This bit position is P
-///                |
-///    8 ---> 0000 1000
-///                 --- Bits after P
-///
-/// 0x18 ---> 0001 1000
-///                 --- Bits after P are 0 in the address, so 0x18 is aligned
-///
-/// 0x19 ---> 0001 1001
-///                 --- Not all bits are zero, so 0x19 is not 8-aligned
-///
-/// 0x20 ---> 0010 0000
-///                 --- All bits are 0, so 0x20 is 8-aligned
-/// ```
-///
-/// Knowing this, we now have to somehow isolate the bits _after_ the position
-/// P in the address so that we can manipulate them to be zero and meet the
-/// alignment constraint. To do that, we need a bit mask, which we can obtain
-/// by substracting 1 to `align` and applying bitwise NOT over the result:
-///
-/// ```rust
-/// // Let's make it u8 so that we don't have to write 64 bits one by one, but
-/// // remember that addresses are the same size as usize.
-/// let align: u8 = 8;
-/// assert_eq!(8, 0b00001000);
-///
-/// // Substracting 1 to any power of 2 will make the bits after P equal to 1.
-/// let bits_after_P_position = align - 1;
-/// assert_eq!(bits_after_P_position, 0b00000111);
-///
-/// // Now apply bitwise NOT and we get the mask.
-/// let bit_mask = !bits_after_P_position;
-/// assert_eq!(bit_mask, 0b11111000);
-/// ```
-///
-/// Once we have the bit mask, we can align any address by applying bitwise AND
-/// on the address and the mask. For example:
-///
-/// ```rust
-/// let align: u8 = 8;
-/// let bits_after_P_position = align - 1;
-/// let bit_mask = !bits_after_P_position;
-///
-///         // Hex                     // Decimal
-/// assert_eq!(0x14 & bit_mask, 0x10); // 20 & bit_mask == 16
-/// assert_eq!(0x1C & bit_mask, 0x18); // 28 & bit_mask == 24
-/// assert_eq!(0x24 & bit_mask, 0x20); // 36 & bit_mask == 32
-/// assert_eq!(0x10 & bit_mask, 0x10); // 16 & bit_mask == 16 (stays the same)
-/// ```
-///
-/// Now we know that if we apply this algorithm to any address, it will align
-/// the address _downwards_, which is a problem. Consider an alignment of 16:
-///
-/// ```rust
-/// let align: u8 = 16;
-/// let bits_after_P_position = align - 1;
-/// let bit_mask = !bits_after_P_position;
-/// let content_address = 0x18; // Block content starts at 24 in decimal.
-///
-/// assert_eq!(content_address & bit_mask, 0x10); // Aligns down to 16.
-/// ```
-///
-/// Oops! That shouldn't happen, because we'd return an address that points
-/// before the block content, so the user could override the block header or
-/// the content of another block if the alignment is really big. To fix this,
-/// we are going to offset the original address by `align - 1` bytes and apply
-/// the mask to that:
-///
-/// ```rust
-/// let align: u8 = 16;
-/// let bits_after_P_position = align - 1;
-/// let bit_mask = !bits_after_P_position;
-/// let content_address = 0x18; // Block content starts at 24 in decimal.
-///
-/// // Now this aligns upwards, so its correct.
-/// assert_eq!((content_address + align - 1) & bit_mask, 0x20);
-/// ```
-///
-/// In doing so, we prevent the new address from being located before the
-/// original address. That's because between `address` and `address + align`
-/// there must be another address that meets the required alignment. Refer
-/// back to [`AlignmentBackPointer`] for a detailed explanation, but here's how
-/// we can conceptualize this in terms of bits and masks:
-///
-/// ```text
-/// +-----------------------------+------+------+-----------+
-/// | Variable                    | Dec  | Hex  |    Bin    |
-/// +-----------------------------+------+------+-----------+
-/// | align                       |  16  | 0x10 | 0001 0000 |
-/// | content_address             |  24  | 0x18 | 0001 1000 |
-/// | content_address + align - 1 |  39  | 0x27 | 0010 0111 |
-/// | bit_mask                    |      |      | 1111 0000 |
-/// | result                      |  32  | 0x20 | 0010 0000 |
-/// +-----------------------------+------+------+-----------+
-/// ```
-///
-/// Notice how only the bits after P are affected by the mask, while the other
-/// bits important for powers of two are not affected. In the case of 39, the
-/// fifth bit counting from right to left (starting at 0) stays the same, and
-/// 2 ^ 5 = 32, which is aligned to 16. Adding `align - 1` to the address makes
-/// sure that the next bit important for alignment is set to 1. Let's see
-/// another example:
-///
-/// ```text
-/// +-----------------------------+------+------+-----------+
-/// | Variable                    | Dec  | Hex  |    Bin    |
-/// +-----------------------------+------+------+-----------+
-/// | align                       |  32  | 0x20 | 0010 0000 |
-/// | content_address             |  40  | 0x28 | 0010 1000 |
-/// | content_address + align - 1 |  71  | 0x47 | 0100 0111 |
-/// | bit_mask                    |      |      | 1110 0000 |
-/// | result                      |  64  | 0x40 | 0100 0000 |
-/// +-----------------------------+------+------+-----------+
-/// ```
-///
-/// Again, the bit responsible for 2 ^ 6 = 64 doesn't change, so we will always
-/// get an address that meets the alignment. However, if the content address is
-/// already aligned we're going to get back the same address:
-///
-/// ```rust
-/// let align: u8 = 16;
-/// let bits_after_P_position = align - 1;
-/// let bit_mask = !bits_after_P_position;
-/// let content_address = 0x10; // Block content starts at 16 in decimal.
-///
-/// // Aligned address is equal to the content address.
-/// assert_eq!((content_address + align - 1) & bit_mask, 0x10);
-/// ```
-///
-/// This is a problem. We don't want that for our implementation. Let's what's
-/// the issue:
-///
-/// ```text
-/// +-----------------------------+------+------+-----------+
-/// | Variable                    | Dec  | Hex  |    Bin    |
-/// +-----------------------------+------+------+-----------+
-/// | align                       |  16  | 0x10 | 0001 0000 |
-/// | content_address             |  16  | 0x10 | 0001 1000 |
-/// | content_address + align - 1 |  31  | 0x1F | 0001 1111 |
-/// | bit_mask                    |      |      | 1111 0000 |
-/// | result                      |  16  | 0x10 | 0001 0000 |
-/// +-----------------------------+------+------+-----------+
-/// ```
-///
-/// Basically, the bit responsible for 2 ^ 5 = 32 is not set to 1. The alignment
-/// is still correct, but remember that we don't want to return the content
-/// address to the user because then we have no space to write the back pointer
-/// above it as we would override the header struct. So to fix this, we must set
-/// to 1 the next bit that raises 2 to its next power. To ensure we do, we'll
-/// just get rid of the `- 1`:
-///
-/// ```rust
-/// let align: u8 = 16;
-/// let bits_after_P_position = align - 1;
-/// let bit_mask = !bits_after_P_position;
-/// let content_address = 0x10; // Block content starts at 16 in decimal.
-///
-/// // Note that there's no -1. Next aligned address excluding the address of
-/// // the block content is 0x20, or 32 in decimal.
-/// assert_eq!((content_address + align) & bit_mask, 0x20);
-/// ```
-///
-/// This fixes the issue:
-///
-/// ```text
-/// +-------------------------+------+------+-----------+
-/// | Variable                | Dec  | Hex  |    Bin    |
-/// +-------------------------+------+------+-----------+
-/// | align                   |  16  | 0x10 | 0001 0000 |
-/// | content_address         |  16  | 0x10 | 0001 1000 |
-/// | content_address + align |  32  | 0x20 | 0010 0000 |
-/// | bit_mask                |      |      | 1111 0000 |
-/// | result                  |  32  | 0x10 | 0010 0000 |
-/// +-------------------------+------+------+-----------+
-/// ```
-///
-/// And it still aligns downwards when possible:
-///
-/// ```text
-/// +-------------------------+------+------+-----------+
-/// | Variable                | Dec  | Hex  |    Bin    |
-/// +-------------------------+------+------+-----------+
-/// | align                   |  16  | 0x10 | 0001 0000 |
-/// | content_address         |   8  | 0x08 | 0000 1000 |
-/// | content_address + align |  24  | 0x18 | 0001 1000 |
-/// | bit_mask                |      |      | 1111 0000 |
-/// | result                  |  16  | 0x10 | 0001 0000 |
-/// +-------------------------+------+------+-----------+
-/// ```
-///
-/// The `-1` is used when we need already aligned addresses to stay the same,
-/// but our implementation doesn't need that. I included it here because that's
-/// the code you're gonna find if you search for it on the Internet, but we have
-/// to tweak it a little bit (pun intented), so we better understand how it
-/// works.
-///
-/// Remember that there are 2 hard problems in computer science: cache
-/// invalidation, naming things and off by one errors. And memory allocators
-/// might as well make it into that list.
-///
-/// It's been a long journey, but putting it all together, we get this:
-fn next_aligned_address(address: usize, align: usize) -> usize {
-    (address + align) & !(align - 1)
-}
-
-/// Returns the next address after `address` that meets the alignment
-/// constraint. `address` itself is never returned. See [`next_aligned_address`].
 pub(crate) unsafe fn next_aligned(address: NonNull<u8>, align: usize) -> NonNull<u8> {
-    NonNull::new_unchecked(next_aligned_address(address.as_ptr() as usize, align) as *mut u8)
+    let align_offset = address.as_ptr().align_offset(align);
+
+    let next_aligned = address.as_ptr().map_addr(|addr| {
+        if align_offset == 0 {
+            addr + align
+        } else {
+            addr + align_offset
+        }
+    });
+
+    NonNull::new_unchecked(next_aligned)
 }
 
 #[cfg(test)]
@@ -524,33 +317,6 @@ mod tests {
         for (size, align, expected) in layouts {
             let layout = Layout::from_size_align(size, align).unwrap();
             assert_eq!(minimum_block_size_needed_for(layout), expected);
-        }
-    }
-
-    #[test]
-    fn next_aligned_test() {
-        // (addr, align, expected addr)
-        let params = [
-            // 8-aligned
-            (4, 8, 8),
-            (16, 8, 24),
-            (24, 8, 32),
-            (8, 16, 16),
-            // 16-aligned
-            (16, 16, 32),
-            (40, 16, 48),
-            (48, 16, 64),
-            // 32-aligned
-            (56, 32, 64),
-            (64, 32, 96),
-            // Some "real life" cases
-            (0x7fc4676a5058, 16, 0x7fc4676a5060),
-            (0x7fc4676a5058, 32, 0x7fc4676a5060),
-            (0x7fc4676a5058, 64, 0x7fc4676a5080),
-        ];
-
-        for (address, align, expected) in params {
-            assert_eq!(next_aligned_address(address, align), expected);
         }
     }
 }

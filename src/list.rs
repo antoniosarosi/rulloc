@@ -1,4 +1,7 @@
-use std::{marker::PhantomData, ptr::NonNull};
+use std::{
+    marker::PhantomData,
+    ptr::{self, NonNull},
+};
 
 use crate::{header::Header, Pointer};
 
@@ -60,11 +63,14 @@ impl<T> LinkedList<T> {
     pub unsafe fn append(&mut self, data: T, address: NonNull<u8>) -> NonNull<Header<T>> {
         let node = address.cast();
 
-        *node.as_ptr() = Node {
-            prev: self.tail,
-            next: None,
-            data,
-        };
+        ptr::write(
+            node.as_ptr(),
+            Node {
+                prev: self.tail,
+                next: None,
+                data,
+            },
+        );
 
         if let Some(mut tail) = self.tail {
             tail.as_mut().next = Some(node);
@@ -93,11 +99,14 @@ impl<T> LinkedList<T> {
     ) -> NonNull<Header<T>> {
         let new_node = address.cast();
 
-        *new_node.as_ptr() = Node {
-            prev: Some(node),
-            next: node.as_ref().next,
-            data,
-        };
+        ptr::write(
+            new_node.as_ptr(),
+            Node {
+                prev: Some(node),
+                next: node.as_ref().next,
+                data,
+            },
+        );
 
         if node == self.tail.unwrap() {
             self.tail = Some(new_node);

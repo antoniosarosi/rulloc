@@ -31,6 +31,7 @@ impl<T> Header<T> {
     /// deallocating memory, so the allocator user should give us an address
     /// that we previously provided when allocating. As long as that's true,
     /// this is safe, otherwise it's undefined behaviour.
+    #[inline]
     pub unsafe fn from_content_address(address: NonNull<u8>) -> NonNull<Self> {
         NonNull::new_unchecked(address.as_ptr().cast::<Self>().offset(-1))
     }
@@ -61,6 +62,7 @@ impl<T> Header<T> {
     /// - We are using this function as `Header::content_address_of(header)`
     /// because we want to avoid creating references to `self` to keep Miri
     /// happy. See [Stacked Borrows](https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md).
+    #[inline]
     pub unsafe fn content_address_of(header: NonNull<Self>) -> NonNull<u8> {
         NonNull::new_unchecked(header.as_ptr().offset(1) as *mut u8)
     }

@@ -71,17 +71,19 @@ impl Header<Block> {
     /// guarantee that we won't call this function with an invalid address. This
     /// is only unsafe if the allocator user writes to an address that was
     /// previously deallocated (use after free).
+    #[inline]
     pub unsafe fn from_free_list_node(links: NonNull<FreeListNode>) -> NonNull<Self> {
         Self::from_content_address(links.cast())
     }
 
     /// See [`crate::alignment::AlignmentBackPointer`].
+    #[inline]
     pub unsafe fn from_aligned_address(address: NonNull<u8>) -> NonNull<Self> {
-        let back_pointer = alignment::back_pointer_of(address).as_ptr();
-        *back_pointer
+        *alignment::back_pointer_of(address).as_ptr()
     }
 
     /// Returns a mutable reference to the region that contains this block.
+    #[inline]
     pub unsafe fn region_mut(&mut self) -> &mut Header<Region> {
         self.data.region.as_mut()
     }
@@ -89,16 +91,19 @@ impl Header<Block> {
     /// Helper function to reduce boilerplate. Since the complete block header
     /// is [`Header<Block>`] all [`Block`] fields have to be accessed through
     /// `data`.
+    #[inline]
     pub fn is_free(&self) -> bool {
         self.data.is_free
     }
 
     /// Block size excluding [`BLOCK_HEADER_SIZE`].
+    #[inline]
     pub fn size(&self) -> usize {
         self.data.size
     }
 
     /// Total block size including [`BLOCK_HEADER_SIZE`].
+    #[inline]
     pub fn total_size(&self) -> usize {
         BLOCK_HEADER_SIZE + self.data.size
     }
