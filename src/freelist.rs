@@ -188,9 +188,9 @@ impl FreeList {
     /// list. Not used internally, for now we only need it for testing.
     #[cfg(test)]
     pub unsafe fn first_free_block(&self) -> Option<&Header<Block>> {
-        self.first().and_then(|node| {
+        self.first().map(|node| {
             let block = Header::<Block>::from_free_list_node(node);
-            Some(block.as_ref())
+            block.as_ref()
         })
     }
 }
