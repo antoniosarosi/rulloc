@@ -1,4 +1,4 @@
-use std::{mem, ptr::NonNull};
+use std::{alloc::Layout, mem, ptr::NonNull};
 
 use crate::{
     block::{Block, BLOCK_HEADER_SIZE, MIN_BLOCK_SIZE},
@@ -95,35 +95,60 @@ pub(crate) fn determine_region_length(size: usize) -> usize {
     // region header, block header and user content.
     let total_size = REGION_HEADER_SIZE + BLOCK_HEADER_SIZE + size;
 
-    // Force round up. If we want to store 4104 bytes and page size is 4096
-    // bytes, then we'll request a region that's 2 pages in length
+    // Align up to page size. If we want to store 4104 bytes and page size is
+    // 4096 bytes, then we'll request a region that's 2 pages in length
     // (8192 bytes).
-    let mut length = page_size() * ((total_size + page_size() - 1) / page_size());
+    let mut length = Layout::from_size_align(total_size, page_size())
+        .unwrap()
+        .pad_to_align()
+        .size();
 
-    // If the total size is smaller than the region length we want to make
-    // sure that at least one more block can be allocated in that region.
-    // Imagine that total size ends up being 4048 bytes and page size is
-    // 4096 bytes. We would request a memory region that's 4096 bytes in
-    // length because of the round up, but we would end up with a little
-    // chunk of 48 bytes at the end of the region where we cannot allocate
-    // anything because block header + minimum block size doesn't fit in 48
-    // bytes. At least on 64 bit machines.
+    // There's a little detail left. Whenever we request a new region using
+    // mmap, we initialize the region with one single block that takes up all
+    // the space except for headers. Later in the allocation process, if the
+    // block is too big, it will be split in two different blocks. You can check
+    // the code at [`crate::bucket`] for that.
     //
-    // +-----------------+
-    // | Region header   | <---+
-    // +-----------------+     |
-    // | Block header    |     | This is 4048 bytes, total length is 4096.
-    // +-----------------+     |
-    // | Content         | <---+
-    // +-----------------+
-    // | Remaining chunk | <- 48 bytes. Nothing can be allocated here.
-    // +-----------------+
+    // Now, if the total size needed to store region header, block header and
+    // requested size is less than the region length there's a possibilty that
+    // the resulting block cannot be split in 2 different blocks. Imagine that
+    // the requested size is 3960 bytes and we are running on a 64 bit machine.
+    // On such machine, REGION_HEADER_SIZE = 48 and BLOCK_HEADER_SIZE = 40. That
+    // makes total_size = 4048 bytes. If the page size is 4096 bytes, then we
+    // would request a memory region that's 4096 bytes in length because of the
+    // alignment, but the big block in the region cannot be split in two because
+    // those 48 bytes that we have left (4096 - 4048) cannot fit a minimum
+    // block. On 64 bit machines, this is what happens:
     //
-    // If that happens, we'll request an extra 4096 bytes or whatever the
-    // page size is. The other possible case is that total_size is exactly
-    // equal to length. That's okay because the region would have only one
-    // block that doesn't waste any space and the entire region would be
-    // returned back to the kernel when the block is deallocated.
+    // +----------+---------------------------------------+
+    // |          | +--------+--------------------------+ |
+    // |  Region  | | Block  | Block           48 bytes | |
+    // |  Header  | | Header | Content          Wasted  | |
+    // |          | +--------+--------------------------+ |
+    // +----------+---------------------------------------+
+    // ^          ^ ^        ^                          ^
+    // |          | |        |                          |
+    // +----------+ +--------+--------------------------+
+    //   48 bytes    40 bytes          4008 bytes
+    // ^                                                  ^
+    // |                                                  |
+    // +--------------------------------------------------+
+    //                       4096 bytes
+    //
+    // The block created in the region can store 4008 bytes of content, but 48
+    // of those are wasted because the user only needs 3960 bytes and we cannot
+    // create a new block from them either, because it would only fit the header
+    // without any content. So we have two options: either waste those bytes and
+    // wait until the block is deallocated or reallocated for them to be used
+    // again, or request an additional page to make sure the block can be
+    // split in two.
+    //
+    // For now, we'll just request another page so that we have a free block,
+    // but the other option isn't actually bad. The same scenario can happen
+    // when searching for free blocks, we might find one that can fit the
+    // requested size but wastes a little space because we can't split it, so
+    // this will only help reduce fragmentation when mapping new regions, but
+    // anything can happen from there on.
     if total_size < length && total_size + BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE > length {
         length += page_size();
     }

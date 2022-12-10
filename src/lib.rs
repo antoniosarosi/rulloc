@@ -3,6 +3,8 @@
 #![feature(is_some_and)]
 #![feature(nonnull_slice_from_raw_parts)]
 #![feature(strict_provenance)]
+#![feature(slice_ptr_get)]
+#![feature(pointer_is_aligned)]
 
 use std::ptr::NonNull;
 

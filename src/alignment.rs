@@ -272,21 +272,22 @@ pub(crate) fn minimum_block_size_needed_for(layout: Layout) -> usize {
 }
 
 /// Returns the next address after the given address tha satisfies the required
-/// alignment. The received address is never returned because the method
-/// described at [`AlignmentBackPointer`] doesn't work if the address is
-/// exactly the content address of a block.
-pub(crate) unsafe fn next_aligned(address: NonNull<u8>, align: usize) -> NonNull<u8> {
+/// alignment as well as the padding or offset introduced after the given
+/// address. The given address is never returned because the method described at
+/// [`AlignmentBackPointer`] doesn't work if the address is exactly the content
+/// address of a block.
+pub(crate) unsafe fn next_aligned(address: NonNull<u8>, align: usize) -> (NonNull<u8>, usize) {
     let align_offset = address.as_ptr().align_offset(align);
 
-    let next_aligned = address.as_ptr().map_addr(|addr| {
-        if align_offset == 0 {
-            addr + align
-        } else {
-            addr + align_offset
-        }
-    });
+    let padding = if align_offset == 0 {
+        align
+    } else {
+        align_offset
+    };
 
-    NonNull::new_unchecked(next_aligned)
+    let next_aligned = address.as_ptr().map_addr(|addr| addr + padding);
+
+    (NonNull::new_unchecked(next_aligned), padding)
 }
 
 #[cfg(test)]

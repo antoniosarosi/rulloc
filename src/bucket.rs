@@ -76,10 +76,10 @@ impl Bucket {
             None => self.request_region(size)?.as_ref().first_block(),
         };
 
-        self.split_free_block_if_possible(free_block, size);
+        self.split_block_if_possible(free_block, size);
         self.free_blocks.remove_block(free_block);
 
-        let address = self.introduce_padding(free_block, layout.align());
+        let address = self.add_padding_if_needed(free_block, layout.align());
 
         Ok(address)
     }
@@ -88,17 +88,13 @@ impl Bucket {
     /// if the region where `address` is located still contains used blocks.
     /// However, the freed block will be reused later if possible.
     pub unsafe fn deallocate(&mut self, address: NonNull<u8>, layout: Layout) {
-        let mut block = if layout.align() <= alignment::POINTER_SIZE {
-            Header::<Block>::from_content_address(address)
-        } else {
-            Header::<Block>::from_aligned_address(address)
-        };
+        let mut block = Header::<Block>::from_allocated_pointer(address, layout);
 
         // This block is now free as it is about to be deallocated.
         self.free_blocks.append_block(block);
 
         // If previous block is merged then the address will change.
-        block = self.merge_free_blocks_if_possible(block);
+        block = self.merge_surrounding_free_blocks_if_possible(block);
 
         let region = block.as_ref().data.region;
 
@@ -116,12 +112,106 @@ impl Bucket {
         }
     }
 
+    /// Makes the allocated block smaller. Shrinking is always done in place
+    /// unless we can't satisfy the new alignment constraints. See
+    /// [`crate::alignment`].
+    pub unsafe fn shrink(
+        &mut self,
+        address: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let block = Header::<Block>::from_allocated_pointer(address, old_layout);
+        let content_addr = Header::<Block>::content_address_of(block);
+
+        // Make sure that next address is aligned to pointer size.
+        let new_size = new_layout.size() + new_layout.padding_needed_for(alignment::POINTER_SIZE);
+
+        // Best case scenario, we can shrink this block in place without doing
+        // much work, so early return.
+        if new_layout.align() <= alignment::POINTER_SIZE {
+            // If the old alignment was greater than pointer size then get rid
+            // of padding to reduce fragmentation.
+            if old_layout.align() > alignment::POINTER_SIZE {
+                ptr::copy(address.as_ptr(), content_addr.as_ptr(), new_layout.size());
+            }
+            self.split_block_if_possible(block, new_size);
+
+            return Ok(NonNull::slice_from_raw_parts(
+                content_addr,
+                block.as_ref().size(),
+            ));
+        }
+
+        // The code below deals with all the rest of cases. We know for sure
+        // that the new layout needs padding, old layout might have had padding
+        // or not but we don't care because we're already given the address
+        // where to user content starts in case we need to copy it somewhere
+        // else.
+        let (next_aligned, padding) = alignment::next_aligned(content_addr, new_layout.align());
+
+        // Can't reuse this block, so find a new one and return.
+        if padding + new_size > block.as_ref().size() {
+            return Ok(self.reallocate(block, address, old_layout, new_layout)?);
+        }
+
+        // We only need to copy the contents if the current address is
+        // not already aligned. If `next_aligned` is located before `address`
+        // then the alignment has decreased so by moving the content backwards
+        // we'll reduce fragmentation. If `next_aligned` is located after
+        // `address` then the alignment has increased but we can still reuse
+        // this block because it fits the new padding. Otherwise, the address
+        // stays the same whether or not the alignment has changed, because it
+        // is already aligned.
+        //
+        // Note that if old alignment was POINTER_SIZE this still works because
+        // the `next_aligned()` function will never return the content address
+        // of the block, so we're safe, the alignment back pointer won't
+        // override fields of the block header. Of course, this conclusion was
+        // reached by first writing a dozen of if-else statements and noticing
+        // that the same code is repeated everywhere.
+        if next_aligned != address {
+            ptr::copy(address.as_ptr(), next_aligned.as_ptr(), new_layout.size());
+            ptr::write(alignment::back_pointer_of(next_aligned).as_ptr(), block);
+        }
+
+        self.split_block_if_possible(block, new_size + padding);
+
+        Ok(NonNull::slice_from_raw_parts(
+            next_aligned,
+            block.as_ref().size() - padding,
+        ))
+    }
+
+    /// Reallocates the contents of a block somewhere else. This function should
+    /// only be called if a block cannot be reused for shrinking or growing.
+    /// Initial content address from where data should be copied to the new
+    /// block has to be provided. The given block will be automatically added
+    /// to the free list.
+    unsafe fn reallocate(
+        &mut self,
+        block: NonNull<Header<Block>>,
+        address: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let new_address = self.allocate(new_layout)?;
+        ptr::copy_nonoverlapping(
+            address.as_ptr(),
+            new_address.as_mut_ptr(),
+            old_layout.size(),
+        );
+        self.free_blocks.append_block(block);
+
+        Ok(new_address)
+    }
+
     /// This function performs the algorithm described at
     /// [`alignment::AlignmentBackPointer`]. The caller must guarantee that
     /// the given block meets the size constraints needed to introduce enough
     /// padding without overriding other headers. See
     /// [`alignment::minimum_block_size_needed_for`].
-    unsafe fn introduce_padding(
+    unsafe fn add_padding_if_needed(
         &self,
         block: NonNull<Header<Block>>,
         align: usize,
@@ -132,11 +222,9 @@ impl Bucket {
             return NonNull::slice_from_raw_parts(content_address, block.as_ref().size());
         }
 
-        let next_aligned = alignment::next_aligned(content_address, align);
+        let (next_aligned, padding) = alignment::next_aligned(content_address, align);
 
         ptr::write(alignment::back_pointer_of(next_aligned).as_ptr(), block);
-
-        let padding = next_aligned.as_ptr().offset_from(content_address.as_ptr()) as usize;
 
         return NonNull::slice_from_raw_parts(next_aligned, block.as_ref().size() - padding);
     }
@@ -196,7 +284,7 @@ impl Bucket {
     }
 
     /// Block splitting algorithm implementation. Let's say we have a free block
-    /// that can hold 64 bytes and a request to allocate 8 bytes has been made.
+    /// that can hold 128 bytes and a request to allocate 8 bytes has been made.
     /// We'll split the free block in two different blocks, like so:
     ///
     /// **Before**:
@@ -205,7 +293,7 @@ impl Bucket {
     ///         +-->  +-----------+
     ///         |     |   Header  | <- H bytes (depends on word size and stuff).
     /// Block   |     +-----------+
-    ///         |     |  Content  | <- 64 bytes.
+    ///         |     |  Content  | <- 128 bytes.
     ///         +-->  +-----------+
     /// ```
     /// **After**:
@@ -218,21 +306,30 @@ impl Bucket {
     ///         +-->  +-----------+
     ///         |     |   Header  | <- H bytes.
     /// Block 2 |     +-----------+
-    ///         |     |  Content  | <- 64 bytes - 8 bytes - H bytes.
+    ///         |     |  Content  | <- 128 bytes - 8 bytes - H bytes.
     ///         +-->  +-----------+
     /// ```
-    unsafe fn split_free_block_if_possible(
-        &mut self,
-        mut block: NonNull<Header<Block>>,
-        size: usize,
-    ) {
+    ///
+    /// The block doesn't necessarily have to be free, it might be in use but
+    /// we want to shrink it. See [`Self::shrink`]. This function does not touch
+    /// the contents of the block, it only changes it's header to reflect the
+    /// new size. On the other hand, the new block created in the splitting
+    /// process is automatically added to the free list.
+    ///
+    /// # Safety
+    ///
+    /// User content in this block can never exceed `size` bytes, this is only
+    /// relevant for shrinking used blocks. If padding was introduced in this
+    /// block to meet alignment constraints, the caller must guarantee that
+    /// padding is included in `size`.
+    unsafe fn split_block_if_possible(&mut self, mut block: NonNull<Header<Block>>, size: usize) {
         // If there's not enough space available we can't split the block.
         if block.as_ref().size() < size + BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE {
             return;
         }
 
-        // If we can, the block is located `size` bytes after the initial
-        // content address of the current block.
+        // If we can, the new block will be located `size` bytes after the
+        // initial content address of the current block.
         let address = Header::content_address_of(block).as_ptr().add(size);
         let mut region = block.as_ref().data.region;
 
@@ -253,7 +350,7 @@ impl Bucket {
         block.as_mut().data.size = size;
     }
 
-    /// This function performs the inverse of [`Self::split_free_block_if_possible`].
+    /// This function performs the inverse of [`Self::split_block_if_possible`].
     /// If surrounding blocks are free, then we'll merge them all into one
     /// bigger block. This is called block coalescing or block merging.
     ///
@@ -290,8 +387,13 @@ impl Bucket {
     /// free. Also, if the previous block is merged, then the address of the
     /// current block changes. That's why we have to return a pointer to a
     /// block.
+    ///
+    /// # Safety
+    ///
+    /// Unlike [`Self::split_free_block`], the caller must guarantee that
+    /// `block` is free in this case.
     #[rustfmt::skip]
-    unsafe fn merge_free_blocks_if_possible(
+    unsafe fn merge_surrounding_free_blocks_if_possible(
         &mut self,
         mut block: NonNull<Header<Block>>,
     ) -> NonNull<Header<Block>> {

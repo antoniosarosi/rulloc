@@ -1,4 +1,4 @@
-use std::{mem, ptr::NonNull};
+use std::{alloc::Layout, mem, ptr::NonNull};
 
 use crate::{alignment, freelist::FreeListNode, header::Header, region::Region};
 
@@ -79,6 +79,16 @@ impl Header<Block> {
     #[inline]
     pub unsafe fn from_aligned_address(address: NonNull<u8>) -> NonNull<Self> {
         *alignment::back_pointer_of(address).as_ptr()
+    }
+
+    /// See [`Header::from_content_address`] and [`Self::from_aligned_address`].
+    #[inline]
+    pub unsafe fn from_allocated_pointer(address: NonNull<u8>, layout: Layout) -> NonNull<Self> {
+        if layout.align() <= alignment::POINTER_SIZE {
+            Self::from_content_address(address)
+        } else {
+            Self::from_aligned_address(address)
+        }
     }
 
     /// Returns a mutable reference to the region that contains this block.
