@@ -457,18 +457,17 @@ mod tests {
     use crate::{alignment::AlignmentBackPointer, region::PAGE_SIZE};
 
     #[test]
-    fn regions_and_blocks() {
+    fn allocs_and_deallocs() {
         unsafe {
             let mut bucket = Bucket::new();
-
-            // We'll use this later to check memory corruption. The allocator
-            // should not touch the content of any block.
-            let corruption_check = 69;
 
             // Request 1 byte, should call `mmap` with length of PAGE_SIZE.
             let first_layout = Layout::new::<u8>();
             let first_addr = bucket.allocate(first_layout).unwrap().cast::<u8>();
 
+            // We'll use this later to check memory corruption. The allocator
+            // should not touch the content of any block.
+            let corruption_check = 69;
             *first_addr.as_ptr() = corruption_check;
 
             // First region should be PAGE_SIZE in length.
@@ -476,9 +475,8 @@ mod tests {
             assert_eq!(first_region.as_ref().total_size(), PAGE_SIZE);
             assert_eq!(bucket.regions.len(), 1);
 
-            let first_block = first_region.as_ref().first_block();
-
             // First block should be located after the region header.
+            let first_block = first_region.as_ref().first_block();
             assert_eq!(
                 first_block.as_ptr() as usize - first_region.as_ptr() as usize,
                 REGION_HEADER_SIZE
@@ -506,8 +504,8 @@ mod tests {
             let second_addr = bucket.allocate(second_layout).unwrap().cast::<u8>();
 
             // We'll check corruption later.
-            for _ in 0..second_layout.size() {
-                *second_addr.as_ptr() = corruption_check;
+            for i in 0..second_layout.size() {
+                *second_addr.as_ptr().add(i) = corruption_check;
             }
 
             // There are 3 blocks now, last one is still free.
@@ -523,8 +521,8 @@ mod tests {
             let third_layout = Layout::array::<u8>(remaining_size).unwrap();
             let third_addr = bucket.allocate(third_layout).unwrap().cast::<u8>();
 
-            for _ in 0..third_layout.size() {
-                *third_addr.as_ptr() = corruption_check;
+            for i in 0..third_layout.size() {
+                *third_addr.as_ptr().add(i) = corruption_check;
             }
 
             // Number of blocks hasn't changed, but we don't have free blocks
@@ -534,19 +532,19 @@ mod tests {
 
             // Time for checking memory corruption
             assert_eq!(*first_addr.as_ptr(), corruption_check);
-            for _ in 0..second_layout.size() {
-                assert_eq!(*second_addr.as_ptr(), corruption_check);
+            for i in 0..second_layout.size() {
+                assert_eq!(*second_addr.as_ptr().add(i), corruption_check);
             }
-            for _ in 0..third_layout.size() {
-                assert_eq!(*third_addr.as_ptr(), corruption_check);
+            for i in 0..third_layout.size() {
+                assert_eq!(*third_addr.as_ptr().add(i), corruption_check);
             }
 
             // Let's request a bigger chunk so that a new region is used.
             let fourth_layout = Layout::array::<u8>(PAGE_SIZE * 2 - PAGE_SIZE / 2).unwrap();
             let fourth_addr = bucket.allocate(fourth_layout).unwrap().cast::<u8>();
 
-            for _ in 0..fourth_layout.size() {
-                *fourth_addr.as_ptr() = corruption_check;
+            for i in 0..fourth_layout.size() {
+                *fourth_addr.as_ptr().add(i) = corruption_check;
             }
 
             // We should have a new region and a new free block now.
@@ -577,8 +575,8 @@ mod tests {
             assert_eq!(bucket.free_blocks.len(), 1);
 
             // Check mem corruption in the last block
-            for _ in 0..fourth_layout.size() {
-                assert_eq!(*fourth_addr.as_ptr(), corruption_check);
+            for i in 0..fourth_layout.size() {
+                assert_eq!(*fourth_addr.as_ptr().add(i), corruption_check);
             }
 
             // Deallocating fourh address should unmap the last region.
