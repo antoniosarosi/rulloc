@@ -73,6 +73,13 @@ struct InternalAllocator<const N: usize> {
     dyn_bucket: Bucket,
 }
 
+/// See [`InternalAllocator::reallocate`]. We have to execute some code
+/// whether shrinking or growing, so we need this for reusability.
+enum ReallocMethod {
+    Shrink,
+    Grow,
+}
+
 impl<const N: usize> InternalAllocator<N> {
     /// Builds a new allocator configured with the given bucket sizes.
     pub const fn with_bucket_sizes(sizes: [usize; N]) -> Self {
@@ -84,15 +91,30 @@ impl<const N: usize> InternalAllocator<N> {
         }
     }
 
-    /// Returns the [`Bucket`] where `layout` should be allocated.
-    fn dispatch(&mut self, layout: Layout) -> &mut Bucket {
-        for (i, bucket) in self.buckets.iter_mut().enumerate() {
-            if layout.size() <= self.sizes[i] {
-                return bucket;
+    /// Returns the index of the [`Bucket`] where `layout` should be allocated.
+    fn bucket_index_of(&self, layout: Layout) -> usize {
+        for (i, size) in self.sizes.iter().enumerate() {
+            if layout.size() <= *size {
+                return i;
             }
         }
 
-        &mut self.dyn_bucket
+        self.buckets.len()
+    }
+
+    /// Returns a mutable reference to the [`Bucket`] at `index`.
+    fn bucket_mut(&mut self, index: usize) -> &mut Bucket {
+        if index == self.buckets.len() {
+            &mut self.dyn_bucket
+        } else {
+            &mut self.buckets[index]
+        }
+    }
+
+    /// Returns a mutable reference to the [`Bucket`] where `layout` should be
+    /// allocated.
+    fn dispatch(&mut self, layout: Layout) -> &mut Bucket {
+        self.bucket_mut(self.bucket_index_of(layout))
     }
 
     /// Returns an address where `layout.size()` bytes can be safely written or
@@ -107,6 +129,43 @@ impl<const N: usize> InternalAllocator<N> {
         // know the layout. If the API of the trait changes, we should store a
         // pointer to the bucket in every region.
         self.dispatch(layout).deallocate(address, layout)
+    }
+
+    /// Reallocation algorithm. Whether shrinking or growing, we'll try to
+    /// preserve the maximum allocation size of each bucket as it was defined
+    /// when creating the struct. So if `new_layout` should be allocated in a
+    /// different bucket, we'll move the user contents there. Otherwise just
+    /// delegate the call to the current bucket and handle reallocation
+    /// internally.
+    pub unsafe fn reallocate(
+        &mut self,
+        address: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+        method: ReallocMethod,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let current_bucket = self.bucket_index_of(old_layout);
+        let ideal_bucket = self.bucket_index_of(new_layout);
+
+        if current_bucket != ideal_bucket {
+            let new_address = self.bucket_mut(ideal_bucket).allocate(new_layout)?;
+            ptr::copy_nonoverlapping(
+                address.as_ptr(),
+                new_address.as_mut_ptr(),
+                new_layout.size(),
+            );
+            self.bucket_mut(current_bucket)
+                .deallocate(address, old_layout);
+
+            Ok(new_address)
+        } else {
+            match method {
+                ReallocMethod::Shrink => self
+                    .bucket_mut(current_bucket)
+                    .shrink(address, old_layout, new_layout),
+                ReallocMethod::Grow => todo!(),
+            }
+        }
     }
 }
 
@@ -176,6 +235,39 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
     unsafe fn deallocate(&self, address: NonNull<u8>, layout: Layout) {
         if let Ok(mut allocator) = self.allocator.lock() {
             allocator.get_mut().deallocate(address, layout)
+        }
+    }
+
+    unsafe fn shrink(
+        &self,
+        address: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        match self.allocator.lock() {
+            Ok(mut allocator) => allocator.get_mut().reallocate(
+                address,
+                old_layout,
+                new_layout,
+                ReallocMethod::Shrink,
+            ),
+            Err(_) => Err(AllocError),
+        }
+    }
+
+    unsafe fn grow(
+        &self,
+        address: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        match self.allocator.lock() {
+            Ok(mut allocator) => {
+                allocator
+                    .get_mut()
+                    .reallocate(address, old_layout, new_layout, ReallocMethod::Grow)
+            }
+            Err(_) => Err(AllocError),
         }
     }
 }

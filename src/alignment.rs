@@ -271,6 +271,18 @@ pub(crate) fn minimum_block_size_needed_for(layout: Layout) -> usize {
     size
 }
 
+/// Returns the minimum block size needed to allocate `layout` without taking
+/// `layout.align()` into consideration. This is useful for reallocations,
+/// where an address might be already aligned so no need to account for
+/// padding.
+pub(crate) fn minimum_block_size_excluding_padding(layout: Layout) -> usize {
+    if layout.size() <= MIN_BLOCK_SIZE {
+        MIN_BLOCK_SIZE // This size is already aligned to POINTER_SIZE
+    } else {
+        layout.size() + layout.padding_needed_for(POINTER_SIZE)
+    }
+}
+
 /// Returns the next address after the given address tha satisfies the required
 /// alignment as well as the padding or offset introduced after the given
 /// address. The given address is never returned because the method described at

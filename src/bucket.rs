@@ -124,8 +124,9 @@ impl Bucket {
         let block = Header::<Block>::from_allocated_pointer(address, old_layout);
         let content_addr = Header::<Block>::content_address_of(block);
 
-        // Make sure that next address is aligned to pointer size.
-        let new_size = new_layout.size() + new_layout.padding_needed_for(alignment::POINTER_SIZE);
+        // We'll prioritize block reusability where possible, so don't add
+        // extra padding for alignment. We'll deal with padding later.
+        let new_size = alignment::minimum_block_size_excluding_padding(new_layout);
 
         // Best case scenario, we can shrink this block in place without doing
         // much work, so early return.
@@ -454,7 +455,10 @@ impl Drop for Bucket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{alignment::AlignmentBackPointer, region::PAGE_SIZE};
+    use crate::{
+        alignment::AlignmentBackPointer,
+        region::{page_size, PAGE_SIZE},
+    };
 
     #[test]
     fn allocs_and_deallocs() {
@@ -636,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn alignment() {
+    fn strictly_aligned_allocs_and_deallocs() {
         unsafe {
             let mut bucket = Bucket::new();
 
@@ -678,6 +682,142 @@ mod tests {
                 }
             }
             assert_eq!(bucket.regions().len(), 0);
+        }
+    }
+
+    fn check_mem_corruption(chunk: &[u8], corruption_check: u8) {
+        for value in chunk {
+            assert_eq!(value, &corruption_check);
+        }
+    }
+
+    #[test]
+    fn shrink() {
+        unsafe {
+            let corruption_check = 42;
+            let mut bucket = Bucket::new();
+
+            // Allocate entire page.
+            let first_layout =
+                Layout::array::<u8>(page_size() - REGION_HEADER_SIZE - BLOCK_HEADER_SIZE).unwrap();
+            let mut first_addr = bucket.allocate(first_layout).unwrap();
+
+            first_addr.as_mut().fill(corruption_check);
+
+            // Now shrink by half
+            let first_layout_shrunk =
+                Layout::from_size_align(first_layout.size() / 2, first_layout.align()).unwrap();
+            let first_addr_shrunk = bucket
+                .shrink(first_addr.cast(), first_layout_shrunk, first_layout_shrunk)
+                .unwrap();
+
+            check_mem_corruption(first_addr_shrunk.as_ref(), corruption_check);
+
+            // Shrinking by half should have shrunk the block in place
+            assert_eq!(first_addr.cast::<u8>(), first_addr_shrunk.cast::<u8>());
+            let first_region = bucket.regions().first().unwrap();
+            assert_eq!(
+                first_region.as_ref().first_block().as_ref().size(),
+                first_layout_shrunk
+                    .align_to(alignment::POINTER_SIZE)
+                    .unwrap()
+                    .pad_to_align()
+                    .size()
+            );
+            assert_eq!(first_region.as_ref().num_blocks(), 2);
+            assert_eq!(bucket.free_blocks.len(), 1);
+            assert_eq!(bucket.regions.len(), 1);
+
+            // Let's allocate the remaining block
+            let second_layout = Layout::array::<u8>(
+                page_size()
+                    - REGION_HEADER_SIZE
+                    - 2 * BLOCK_HEADER_SIZE
+                    - first_region.as_ref().first_block().as_ref().size(),
+            )
+            .unwrap();
+
+            let mut second_addr = bucket.allocate(second_layout).unwrap();
+            assert_eq!(second_addr.as_ref().len(), second_layout.size());
+            assert_eq!(first_region.as_ref().num_blocks(), 2);
+            assert_eq!(bucket.free_blocks.len(), 0);
+
+            second_addr.as_mut().fill(corruption_check);
+
+            // Let's use page size alignment to force reallocation, because
+            // we don't know what address mmap gave us for the region, we only
+            // know that it is aligned to page size. The next address aligned
+            // to page size is at the end of this region, so this should
+            // reallocate.
+            let second_layout_page_aligned =
+                Layout::from_size_align(second_layout.size(), page_size()).unwrap();
+            let second_addr_page_aligned = bucket
+                .shrink(
+                    second_addr.cast(),
+                    second_layout,
+                    second_layout_page_aligned,
+                )
+                .unwrap();
+            let second_region = bucket.regions.last().unwrap();
+            assert_eq!(bucket.regions.len(), 2);
+            assert_eq!(second_region.as_ref().num_blocks(), 2);
+
+            // Last block that we were using was deallocated, and the new one
+            // won't take up all the space in the region.
+            assert_eq!(bucket.free_blocks.len(), 2);
+            assert_ne!(
+                second_addr.as_mut_ptr(),
+                second_addr_page_aligned.as_mut_ptr()
+            );
+            // Account for padding.
+            assert_eq!(
+                second_addr_page_aligned.len(),
+                page_size() - REGION_HEADER_SIZE - BLOCK_HEADER_SIZE - second_layout.size()
+            );
+            assert_eq!(
+                second_addr_page_aligned.as_mut_ptr() as usize % page_size(),
+                0
+            );
+
+            // We've only filled the memory the allocator gave us the first
+            // time, but after forcing reallocation to page size alignment it
+            // will give us a little bit more than we need because the minimum
+            // block size has to account for the padding needed in the worst
+            // case.
+            check_mem_corruption(
+                &second_addr_page_aligned.as_ref()[0..second_addr.len()],
+                corruption_check,
+            );
+
+            // Now let's reduce alignment to force everyhing to be moved
+            // backwards.
+            let previous_block_size = second_region.as_ref().first_block().as_ref().size();
+            let second_layout_half_page_aligned =
+                Layout::from_size_align(second_layout.size(), page_size() / 2).unwrap();
+            let second_addr_half_page_aligned = bucket
+                .shrink(
+                    second_addr_page_aligned.cast(),
+                    second_layout_page_aligned,
+                    second_layout_half_page_aligned,
+                )
+                .unwrap();
+
+            assert!(
+                second_addr_half_page_aligned
+                    .as_mut_ptr()
+                    .offset_from(second_addr_page_aligned.as_mut_ptr())
+                    < 0
+            );
+            // Less padding, so block is smaller.
+            assert!(previous_block_size > second_region.as_ref().first_block().as_ref().size());
+            assert_eq!(
+                second_addr_half_page_aligned.as_mut_ptr() as usize % (page_size() / 2),
+                0
+            );
+            check_mem_corruption(
+                &second_addr_half_page_aligned.as_ref()[0..second_addr.len()],
+                corruption_check,
+            );
         }
     }
 }

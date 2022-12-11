@@ -39,13 +39,12 @@ pub(crate) unsafe fn munmap(address: ptr::NonNull<u8>, length: usize) {
     }
 }
 
-/// Maps a given `length` in bytes to a layout. Used only for Miri tests.
+/// Maps a given `length` in bytes to a layout. Used only for Miri tests. The
+/// alignment is page size because `mmap` always gives us page size aligned
+/// memory.
 #[cfg(miri)]
 fn to_layout(length: usize) -> std::alloc::Layout {
-    std::alloc::Layout::array::<u8>(length)
-        .unwrap()
-        .align_to(std::mem::size_of::<usize>())
-        .unwrap()
+    std::alloc::Layout::from_size_align(length, crate::region::page_size()).unwrap()
 }
 
 /// When running on Miri, all `mmap` calls are mocked using the global

@@ -55,6 +55,13 @@ impl<T> LinkedList<T> {
         self.head
     }
 
+    /// Last element in the list. For now it's only used in tests.
+    #[cfg(test)]
+    #[inline]
+    pub fn last(&self) -> Pointer<Header<T>> {
+        self.tail
+    }
+
     /// Appends a new node to the linked list. Since it cannot do allocations
     /// (WE ARE THE ALLOCATOR!) it needs the address where the node should be
     /// written to.
