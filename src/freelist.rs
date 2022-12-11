@@ -193,4 +193,11 @@ impl FreeList {
             block.as_ref()
         })
     }
+
+    /// Free list nodes are a little bit harder to iterate because they don't
+    /// point to block headers, so let's make it easier.
+    pub unsafe fn iter_blocks(&self) -> impl Iterator<Item = NonNull<Header<Block>>> {
+        self.iter()
+            .map(|node| Header::<Block>::from_free_list_node(node))
+    }
 }

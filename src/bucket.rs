@@ -274,14 +274,9 @@ impl Bucket {
     /// Returns the first free block in the free list or `None` if we didn't
     /// find any.
     unsafe fn find_free_block(&self, size: usize) -> Pointer<Header<Block>> {
-        for node in &*self.free_blocks {
-            let block = Header::<Block>::from_free_list_node(node);
-            if block.as_ref().size() >= size {
-                return Some(block);
-            }
-        }
-
-        None
+        self.free_blocks
+            .iter_blocks()
+            .find(|block| block.as_ref().size() >= size)
     }
 
     /// Block splitting algorithm implementation. Let's say we have a free block
