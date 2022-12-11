@@ -5,7 +5,11 @@ use std::{
     sync::Mutex,
 };
 
-use crate::bucket::Bucket;
+use crate::{
+    bucket::Bucket,
+    realloc::{Realloc, ReallocMethod},
+    AllocResult,
+};
 
 /// This is the main allocator, it contains multiple allocation buckets for
 /// different sizes. Once you've read [`crate::header`], [`crate::block`],
@@ -73,13 +77,6 @@ struct InternalAllocator<const N: usize> {
     dyn_bucket: Bucket,
 }
 
-/// See [`InternalAllocator::reallocate`]. We have to execute some code
-/// whether shrinking or growing, so we need this for reusability.
-enum ReallocMethod {
-    Shrink,
-    Grow,
-}
-
 impl<const N: usize> InternalAllocator<N> {
     /// Builds a new allocator configured with the given bucket sizes.
     pub const fn with_bucket_sizes(sizes: [usize; N]) -> Self {
@@ -139,34 +136,23 @@ impl<const N: usize> InternalAllocator<N> {
     /// different bucket, we'll move the user contents there. Otherwise just
     /// delegate the call to the current bucket and handle reallocation
     /// internally.
-    pub unsafe fn reallocate(
-        &mut self,
-        address: NonNull<u8>,
-        old_layout: Layout,
-        new_layout: Layout,
-        method: ReallocMethod,
-    ) -> Result<NonNull<[u8]>, AllocError> {
-        let current_bucket = self.bucket_index_of(old_layout);
-        let ideal_bucket = self.bucket_index_of(new_layout);
+    pub unsafe fn reallocate(&mut self, realloc: &Realloc) -> AllocResult {
+        let current_bucket = self.bucket_index_of(realloc.old_layout);
+        let ideal_bucket = self.bucket_index_of(realloc.new_layout);
 
         if current_bucket != ideal_bucket {
-            let new_address = self.bucket_mut(ideal_bucket).allocate(new_layout)?;
+            let new_address = self.bucket_mut(ideal_bucket).allocate(realloc.new_layout)?;
             ptr::copy_nonoverlapping(
-                address.as_ptr(),
+                realloc.address.as_ptr(),
                 new_address.as_mut_ptr(),
-                new_layout.size(),
+                realloc.count(),
             );
             self.bucket_mut(current_bucket)
-                .deallocate(address, old_layout);
+                .deallocate(realloc.address, realloc.old_layout);
 
             Ok(new_address)
         } else {
-            match method {
-                ReallocMethod::Shrink => self
-                    .bucket_mut(current_bucket)
-                    .shrink(address, old_layout, new_layout),
-                ReallocMethod::Grow => todo!(),
-            }
+            self.bucket_mut(current_bucket).reallocate(realloc)
         }
     }
 }
@@ -245,14 +231,14 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
         address: NonNull<u8>,
         old_layout: Layout,
         new_layout: Layout,
-    ) -> Result<NonNull<[u8]>, AllocError> {
+    ) -> AllocResult {
         match self.allocator.lock() {
-            Ok(mut allocator) => allocator.get_mut().reallocate(
+            Ok(mut allocator) => allocator.get_mut().reallocate(&Realloc::new(
                 address,
                 old_layout,
                 new_layout,
                 ReallocMethod::Shrink,
-            ),
+            )),
             Err(_) => Err(AllocError),
         }
     }
@@ -262,13 +248,14 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
         address: NonNull<u8>,
         old_layout: Layout,
         new_layout: Layout,
-    ) -> Result<NonNull<[u8]>, AllocError> {
+    ) -> AllocResult {
         match self.allocator.lock() {
-            Ok(mut allocator) => {
-                allocator
-                    .get_mut()
-                    .reallocate(address, old_layout, new_layout, ReallocMethod::Grow)
-            }
+            Ok(mut allocator) => allocator.get_mut().reallocate(&Realloc::new(
+                address,
+                old_layout,
+                new_layout,
+                ReallocMethod::Grow,
+            )),
             Err(_) => Err(AllocError),
         }
     }

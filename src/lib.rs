@@ -6,7 +6,7 @@
 #![feature(slice_ptr_get)]
 #![feature(pointer_is_aligned)]
 
-use std::ptr::NonNull;
+use std::{alloc::AllocError, ptr::NonNull};
 
 mod alignment;
 mod allocator;
@@ -16,6 +16,7 @@ mod freelist;
 mod header;
 mod list;
 mod mmap;
+mod realloc;
 mod region;
 
 /// Non-null pointer to `T`. We use this in most cases instead of `*mut T`
@@ -23,5 +24,8 @@ mod region;
 /// case. I think variance doesn't have much implications here except for
 /// [`list::LinkedList<T>`], but that should probably be covariant anyway.
 pub(crate) type Pointer<T> = Option<NonNull<T>>;
+
+/// Shorter syntax for allocation/reallocation return types.
+pub(crate) type AllocResult = Result<NonNull<[u8]>, AllocError>;
 
 pub use allocator::MmapAllocator;

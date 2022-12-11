@@ -11,8 +11,9 @@ use crate::{
     header::Header,
     list::LinkedList,
     mmap::{mmap, munmap},
+    realloc::{Realloc, ReallocMethod},
     region::{determine_region_length, Region, REGION_HEADER_SIZE},
-    Pointer,
+    AllocResult, Pointer,
 };
 
 /// This, on itself, is actually a memory allocator. But we use multiple of
@@ -68,7 +69,7 @@ impl Bucket {
     /// Because of alignment and headers, it might allocate a bigger block than
     /// needed. As long as no more than `layout.pad_to_align().size()` bytes are
     /// written on the content part of the block it should be fine.
-    pub unsafe fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    pub unsafe fn allocate(&mut self, layout: Layout) -> AllocResult {
         let size = alignment::minimum_block_size_needed_for(layout);
 
         let free_block = match self.find_free_block(size) {
@@ -112,33 +113,58 @@ impl Bucket {
         }
     }
 
-    /// Makes the allocated block smaller. Shrinking is always done in place
-    /// unless we can't satisfy the new alignment constraints. See
-    /// [`crate::alignment`].
-    pub unsafe fn shrink(
-        &mut self,
-        address: NonNull<u8>,
-        old_layout: Layout,
-        new_layout: Layout,
-    ) -> Result<NonNull<[u8]>, AllocError> {
-        let block = Header::<Block>::from_allocated_pointer(address, old_layout);
-        let content_addr = Header::<Block>::content_address_of(block);
+    /// Executes the reallocation specified by `realloc`. When possible,
+    /// reallocation is done in place to avoid copying contents from one block
+    /// to another, but changes in alignment constraints might prevent that.
+    pub unsafe fn reallocate(&mut self, realloc: &Realloc) -> AllocResult {
+        self.try_reallocate_in_place(realloc)
+            .or(self.try_reallocate_on_another_block(realloc))
+    }
 
-        // We'll prioritize block reusability where possible, so don't add
-        // extra padding for alignment. We'll deal with padding later.
-        let new_size = alignment::minimum_block_size_excluding_padding(new_layout);
+    /// We will prioritize in place reallocations, this will only fail if the
+    /// new size doesn't fit even after merging surrounding blocks or if
+    /// alignment has increased drastically and we didn't find any aligned
+    /// address in the current block.
+    pub unsafe fn try_reallocate_in_place(&mut self, realloc: &Realloc) -> AllocResult {
+        match realloc.method {
+            ReallocMethod::Shrink => self.try_shrink_in_place(realloc),
+            ReallocMethod::Grow => self.try_grow_in_place(realloc),
+        }
+    }
 
-        // This block could be reused even if alignment has changed, so that's
-        // what we're aiming for.
-        let (next_aligned, padding) = alignment::next_aligned(content_addr, new_layout.align());
+    /// If everything else fails, just find or create a new block and move
+    /// everything there.
+    pub unsafe fn try_reallocate_on_another_block(&mut self, realloc: &Realloc) -> AllocResult {
+        let new_address = self.allocate(realloc.new_layout)?;
+        ptr::copy_nonoverlapping(
+            realloc.address.as_ptr(),
+            new_address.as_mut_ptr(),
+            realloc.count(),
+        );
+        self.deallocate(realloc.address, realloc.old_layout);
 
-        // Can't reuse this block, so find a new one and return.
-        if padding + new_size > block.as_ref().size() {
-            return Ok(self.reallocate(block, address, old_layout, new_layout)?);
+        Ok(new_address)
+    }
+
+    /// If possible, this function will attempt to reallocate in place without
+    /// merging adjacent blocks or moving the contents to a new block.
+    pub unsafe fn try_reallocate_on_same_block(&mut self, realloc: &Realloc) -> AllocResult {
+        // First let's try to see if we can fit the new layout in this block.
+        let new_size = alignment::minimum_block_size_excluding_padding(realloc.new_layout);
+        let (next_aligned, padding) = alignment::next_aligned(
+            Header::<Block>::content_address_of(realloc.block),
+            realloc.new_layout.align(),
+        );
+
+        // No luck, we can't use this block.
+        if padding + new_size > realloc.block.as_ref().size() {
+            return Err(AllocError);
         }
 
         // Now we know for sure that this block can be reused. The code below
-        // deals with many edge cases even though it doesn't look like it does.
+        // deals with many edge cases even though it doesn't look like it does,
+        // so let's break it down.
+        //
         // We know that `alignment::next_aligned` function will return the first
         // aligned address after the content address of the block, and we also
         // know that there's enough space for padding because we've checked
@@ -167,91 +193,92 @@ impl Bucket {
         // Of course, this conclusion was reached after writing dozens of
         // if-else statements and noticing that the same code is repeated
         // everywhere. So this is just like simplifying a huge equation!
-        if next_aligned != address {
-            ptr::copy(address.as_ptr(), next_aligned.as_ptr(), new_layout.size());
+        if next_aligned != realloc.address {
+            ptr::copy(
+                realloc.address.as_ptr(),
+                next_aligned.as_ptr(),
+                realloc.count(),
+            );
             if padding > 0 {
-                ptr::write(alignment::back_pointer_of(next_aligned).as_ptr(), block);
+                ptr::write(
+                    alignment::back_pointer_of(next_aligned).as_ptr(),
+                    realloc.block,
+                );
             }
         }
 
-        // If we removed padding or the size has decreased enough we might be
-        // able to make the block smaller.
-        self.shrink_block(block, new_size + padding);
+        // If we removed padding or size has decreased, maybe we can create
+        // new free blocks next to this one.
+        self.shrink_block(realloc.block, new_size + padding);
 
         Ok(NonNull::slice_from_raw_parts(
             next_aligned,
-            block.as_ref().size() - padding,
+            realloc.block.as_ref().size() - padding,
         ))
     }
 
-    // pub unsafe fn grow(
-    //     &mut self,
-    //     address: NonNull<u8>,
-    //     old_layout: Layout,
-    //     new_layout: Layout,
-    // ) -> Result<NonNull<[u8]>, AllocError> {
-    //     let mut block = Header::<Block>::from_allocated_pointer(address, old_layout);
-    //     let content_addr = Header::<Block>::content_address_of(block);
-    //     let new_size = alignment::minimum_block_size_excluding_padding(new_layout);
-
-    //     if new_layout.align() <= alignment::POINTER_SIZE {
-    //         let grow_in_place = false;
-    //         if block.as_ref().size() >= new_size {
-    //             grow_in_place = true;
-    //         } else if let Some(next) = block.as_ref().next {
-    //             if next.as_ref().total_size() + block.as_ref().size() >= new_size {
-    //                 self.merge_next_block(block);
-    //                 grow_in_place = true;
-    //             } else if let Some(prev) = block.as_ref().prev {
-    //                 if prev.as_ref().size()
-    //                     + block.as_ref().total_size()
-    //                     + next.as_ref().total_size()
-    //                     >= new_size
-    //                 {
-    //                     self.merge_next_block(block);
-    //                     block = self.merge_next_block(prev);
-    //                     grow_in_place = true;
-    //                 }
-    //             }
-    //         } else if let Some(prev) = block.as_ref().prev {
-    //             if prev.as_ref().size() + block.as_ref().total_size() >= new_size {}
-    //         }
-
-    //         ptr::copy(address.as_ptr(), content_addr.as_ptr(), new_layout.size());
-    //         self.shrink_block(block, new_size);
-    //         return Ok(NonNull::slice_from_raw_parts(
-    //             content_addr,
-    //             block.as_ref().size(),
-    //         ));
-    //     }
-
-    //     Err(AllocError)
-    // }
-
-    /// Reallocates the contents of a block somewhere else. This function should
-    /// only be called if a block cannot be reused for shrinking or growing.
-    /// Initial content address from where data should be copied to the new
-    /// block has to be provided. The given block will be automatically added
-    /// to the free list.
-    unsafe fn reallocate(
+    unsafe fn try_grow_by_merging(
         &mut self,
-        block: NonNull<Header<Block>>,
-        address: NonNull<u8>,
-        old_layout: Layout,
-        new_layout: Layout,
-    ) -> Result<NonNull<[u8]>, AllocError> {
-        let new_address = self.allocate(new_layout)?;
-        ptr::copy_nonoverlapping(
-            address.as_ptr(),
-            new_address.as_mut_ptr(),
-            old_layout.size(),
-        );
-        self.free_blocks.append_block(block);
+        blocks: &[NonNull<Header<Block>>],
+        realloc: &Realloc,
+    ) -> AllocResult {
+        let (starting_block, rest) = blocks.split_first().unwrap();
 
-        Ok(new_address)
+        let new_size = alignment::minimum_block_size_excluding_padding(realloc.new_layout);
+        let padding = alignment::padding_needed_to_align(
+            Header::<Block>::content_address_of(*starting_block),
+            realloc.new_layout.align(),
+        );
+
+        let total_size = rest
+            .iter()
+            .fold(starting_block.as_ref().size(), |total, next| {
+                total + next.as_ref().total_size()
+            });
+
+        if total_size > new_size + padding {
+            return Err(AllocError);
+        }
+
+        for block in blocks.iter().rev().skip(1) {
+            // Merge next
+        }
+
+        self.try_reallocate_on_same_block(&realloc.map(*starting_block))
     }
 
-    /// This function performs the algorithm described at
+    unsafe fn try_grow_by_merging_next_block(&mut self, realloc: &Realloc) -> AllocResult {
+        let Realloc { block, .. } = realloc;
+        let Some (next) = block.as_ref().next else { return Err(AllocError) };
+        self.try_grow_by_merging(&[*block, next], realloc)
+    }
+
+    unsafe fn try_grow_by_merging_prev_block(&mut self, realloc: &Realloc) -> AllocResult {
+        let Realloc { block, .. } = realloc;
+        let Some (prev) = block.as_ref().prev else { return Err(AllocError) };
+        self.try_grow_by_merging(&[prev, *block], realloc)
+    }
+
+    unsafe fn try_grow_by_merging_both_blocks(&mut self, realloc: &Realloc) -> AllocResult {
+        let Realloc { block, .. } = realloc;
+        let Some(next) = block.as_ref().next else { return Err(AllocError) };
+        let Some(prev) = block.as_ref().prev else { return Err(AllocError) };
+        self.try_grow_by_merging(&[prev, *block, next], realloc)
+    }
+
+    unsafe fn try_grow_in_place(&mut self, realloc: &Realloc) -> AllocResult {
+        self.try_reallocate_on_same_block(realloc)
+            .or(self.try_grow_by_merging_next_block(realloc))
+            .or(self.try_grow_by_merging_prev_block(realloc))
+            .or(self.try_grow_by_merging_both_blocks(realloc))
+    }
+
+    /// For simetry with [`Self::try_grow_in_place`].
+    unsafe fn try_shrink_in_place(&mut self, realloc: &Realloc) -> AllocResult {
+        self.try_reallocate_on_same_block(realloc)
+    }
+
+    /// This function executes the algorithm described at
     /// [`alignment::AlignmentBackPointer`]. The caller must guarantee that
     /// the given block meets the size constraints needed to introduce enough
     /// padding without overriding other headers. See

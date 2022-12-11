@@ -307,6 +307,13 @@ pub(crate) unsafe fn next_aligned(address: NonNull<u8>, align: usize) -> (NonNul
     (NonNull::new_unchecked(next_aligned), padding)
 }
 
+/// See [`next_aligned`].
+#[inline]
+pub(crate) unsafe fn padding_needed_to_align(address: NonNull<u8>, align: usize) -> usize {
+    let (_, padding) = next_aligned(address, align);
+    padding
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
