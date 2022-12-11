@@ -128,27 +128,8 @@ impl Bucket {
         // extra padding for alignment. We'll deal with padding later.
         let new_size = alignment::minimum_block_size_excluding_padding(new_layout);
 
-        // Best case scenario, we can shrink this block in place without doing
-        // much work, so early return.
-        if new_layout.align() <= alignment::POINTER_SIZE {
-            // If the old alignment was greater than pointer size then get rid
-            // of padding to reduce fragmentation.
-            if old_layout.align() > alignment::POINTER_SIZE {
-                ptr::copy(address.as_ptr(), content_addr.as_ptr(), new_layout.size());
-            }
-            self.shrink_block(block, new_size);
-
-            return Ok(NonNull::slice_from_raw_parts(
-                content_addr,
-                block.as_ref().size(),
-            ));
-        }
-
-        // The code below deals with all the rest of cases. We know for sure
-        // that the new layout needs padding, old layout might have had padding
-        // or not but we don't care because we're already given the address
-        // where to user content starts in case we need to copy it somewhere
-        // else.
+        // This block could be reused even if alignment has changed, so that's
+        // what we're aiming for.
         let (next_aligned, padding) = alignment::next_aligned(content_addr, new_layout.align());
 
         // Can't reuse this block, so find a new one and return.
@@ -156,26 +137,45 @@ impl Bucket {
             return Ok(self.reallocate(block, address, old_layout, new_layout)?);
         }
 
-        // We only need to copy the contents if the current address is
-        // not already aligned. If `next_aligned` is located before `address`
-        // then the alignment has decreased so by moving the content backwards
-        // we'll reduce fragmentation. If `next_aligned` is located after
-        // `address` then the alignment has increased but we can still reuse
-        // this block because it fits the new padding. Otherwise, the address
-        // stays the same whether or not the alignment has changed, because it
-        // is already aligned.
+        // Now we know for sure that this block can be reused. The code below
+        // deals with many edge cases even though it doesn't look like it does.
+        // We know that `alignment::next_aligned` function will return the first
+        // aligned address after the content address of the block, and we also
+        // know that there's enough space for padding because we've checked
+        // that in the if statement above. So whatever the new alignment is, we
+        // don't care, there's space for it.
         //
-        // Note that if old alignment was POINTER_SIZE this still works because
-        // the `next_aligned()` function will never return the content address
-        // of the block, so we're safe, the alignment back pointer won't
-        // override fields of the block header. Of course, this conclusion was
-        // reached by first writing a dozen of if-else statements and noticing
-        // that the same code is repeated everywhere.
+        // The `next_aligned` address might be located before the current
+        // address (if alignment has decreased) or after the current address
+        // (if alignment has increased), so we'll need to move the contents if
+        // the address wasn't already aligned.
+        //
+        // But now here comes the magic: This code also works for `POINTER_SIZE`
+        // alignment because `alignment::next_aligned` function will return the
+        // content address of the block whenever the alignment is less than or
+        // equal to `POINTER_SIZE`. So if the previous alignment was greater
+        // than `POINTER_SIZE` we'll get rid of all the padding and reduce
+        // fragmentation. If the previous alignment was already `POINTER_SIZE`
+        // then the if statement below won't even run because `next_aligned` is
+        // already equal to the given address!
+        //
+        // The only thing we have to do is write the back pointer if we added
+        // padding, otherwise there's no back pointer. So this covers all the
+        // combinatorics of `old_layout` and `new_layout`, both in terms of
+        // alignment and size.
+        //
+        // Of course, this conclusion was reached after writing dozens of
+        // if-else statements and noticing that the same code is repeated
+        // everywhere. So this is just like simplifying a huge equation!
         if next_aligned != address {
             ptr::copy(address.as_ptr(), next_aligned.as_ptr(), new_layout.size());
-            ptr::write(alignment::back_pointer_of(next_aligned).as_ptr(), block);
+            if padding > 0 {
+                ptr::write(alignment::back_pointer_of(next_aligned).as_ptr(), block);
+            }
         }
 
+        // If we removed padding or the size has decreased enough we might be
+        // able to make the block smaller.
         self.shrink_block(block, new_size + padding);
 
         Ok(NonNull::slice_from_raw_parts(
@@ -183,6 +183,50 @@ impl Bucket {
             block.as_ref().size() - padding,
         ))
     }
+
+    // pub unsafe fn grow(
+    //     &mut self,
+    //     address: NonNull<u8>,
+    //     old_layout: Layout,
+    //     new_layout: Layout,
+    // ) -> Result<NonNull<[u8]>, AllocError> {
+    //     let mut block = Header::<Block>::from_allocated_pointer(address, old_layout);
+    //     let content_addr = Header::<Block>::content_address_of(block);
+    //     let new_size = alignment::minimum_block_size_excluding_padding(new_layout);
+
+    //     if new_layout.align() <= alignment::POINTER_SIZE {
+    //         let grow_in_place = false;
+    //         if block.as_ref().size() >= new_size {
+    //             grow_in_place = true;
+    //         } else if let Some(next) = block.as_ref().next {
+    //             if next.as_ref().total_size() + block.as_ref().size() >= new_size {
+    //                 self.merge_next_block(block);
+    //                 grow_in_place = true;
+    //             } else if let Some(prev) = block.as_ref().prev {
+    //                 if prev.as_ref().size()
+    //                     + block.as_ref().total_size()
+    //                     + next.as_ref().total_size()
+    //                     >= new_size
+    //                 {
+    //                     self.merge_next_block(block);
+    //                     block = self.merge_next_block(prev);
+    //                     grow_in_place = true;
+    //                 }
+    //             }
+    //         } else if let Some(prev) = block.as_ref().prev {
+    //             if prev.as_ref().size() + block.as_ref().total_size() >= new_size {}
+    //         }
+
+    //         ptr::copy(address.as_ptr(), content_addr.as_ptr(), new_layout.size());
+    //         self.shrink_block(block, new_size);
+    //         return Ok(NonNull::slice_from_raw_parts(
+    //             content_addr,
+    //             block.as_ref().size(),
+    //         ));
+    //     }
+
+    //     Err(AllocError)
+    // }
 
     /// Reallocates the contents of a block somewhere else. This function should
     /// only be called if a block cannot be reused for shrinking or growing.

@@ -284,14 +284,19 @@ pub(crate) fn minimum_block_size_excluding_padding(layout: Layout) -> usize {
 }
 
 /// Returns the next address after the given address tha satisfies the required
-/// alignment as well as the padding or offset introduced after the given
-/// address. The given address is never returned because the method described at
-/// [`AlignmentBackPointer`] doesn't work if the address is exactly the content
-/// address of a block.
+/// alignment as well as the padding or offset needed. The given address is
+/// **ONLY** returned if `align == POINTER_SIZE` because otherwise the method
+/// described at [`AlignmentBackPointer`] cannot be implemented.
 pub(crate) unsafe fn next_aligned(address: NonNull<u8>, align: usize) -> (NonNull<u8>, usize) {
     let align_offset = address.as_ptr().align_offset(align);
 
-    let padding = if align_offset == 0 {
+    // Remember that we don't have space for the back pointer if we don't
+    // add at least one `POINTER_SIZE` of padding, so the if statement would
+    // be the worst case scenario where we have to add the entire alignment as
+    // padding. Otherwise add whatever we've computed above. Note that if
+    // `align == POINTER_SIZE` then padding should always be 0 because we work
+    // with pointer size aligned addresses internally.
+    let padding = if align > POINTER_SIZE && align_offset == 0 {
         align
     } else {
         align_offset
