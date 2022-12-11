@@ -136,7 +136,7 @@ impl Bucket {
             if old_layout.align() > alignment::POINTER_SIZE {
                 ptr::copy(address.as_ptr(), content_addr.as_ptr(), new_layout.size());
             }
-            self.split_block_if_possible(block, new_size);
+            self.shrink_block(block, new_size);
 
             return Ok(NonNull::slice_from_raw_parts(
                 content_addr,
@@ -176,7 +176,7 @@ impl Bucket {
             ptr::write(alignment::back_pointer_of(next_aligned).as_ptr(), block);
         }
 
-        self.split_block_if_possible(block, new_size + padding);
+        self.shrink_block(block, new_size + padding);
 
         Ok(NonNull::slice_from_raw_parts(
             next_aligned,
@@ -436,6 +436,40 @@ impl Bucket {
 
         // Next block doesn't exist anymore.
         block.as_mut().region_mut().data.blocks.remove(next);
+    }
+
+    /// Optimized in place shrinking. The block can be split in two different
+    /// blocks, creating a free block next to it, and if there was another free
+    /// block next to the original block then they can be merged into one.
+    ///
+    /// Before:
+    ///
+    /// ```text
+    /// +------------------------------------+    +------------+
+    /// |    Used block about to be shrunk   | -> | Free Block |
+    /// +------------------------------------+    +------------+
+    /// ```
+    ///
+    /// After splitting:
+    ///
+    /// ```text
+    /// +--------------+    +----------------+    +------------+
+    /// | Shrunk Block | -> | New Free block | -> | Free Block |
+    /// +--------------+    +----------------+    +------------+
+    /// ```
+    ///
+    /// After merging:
+    ///
+    /// ```text
+    /// +--------------+    +----------------------------------+
+    /// | Shrunk Block | -> |   Resulting bigger free block    |
+    /// +--------------+    +----------------------------------+
+    /// ```
+    unsafe fn shrink_block(&mut self, block: NonNull<Header<Block>>, new_size: usize) {
+        self.split_block_if_possible(block, new_size);
+        if let Some(next) = block.as_ref().next {
+            self.merge_surrounding_free_blocks_if_possible(next);
+        }
     }
 }
 
@@ -803,6 +837,13 @@ mod tests {
                 &second_addr_half_page_aligned.as_ref()[0..second_addr.len()],
                 corruption_check,
             );
+
+            bucket.deallocate(first_addr_shrunk.cast(), first_layout_shrunk);
+            bucket.deallocate(
+                second_addr_half_page_aligned.cast(),
+                second_layout_half_page_aligned,
+            );
+            assert_eq!(bucket.regions.len(), 0);
         }
     }
 }
