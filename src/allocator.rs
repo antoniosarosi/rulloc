@@ -126,8 +126,10 @@ impl<const N: usize> InternalAllocator<N> {
     /// Deallocates the memory block at `address`.
     pub unsafe fn deallocate(&mut self, address: NonNull<u8>, layout: Layout) {
         // We can find the bucket that has allocated the pointer because we also
-        // know the layout. If the API of the trait changes, we should store a
-        // pointer to the bucket in every region.
+        // know the layout. If the allocator trait changes and the layout is
+        // no longer required, we can still obtain the block header given any
+        // valid address and check the size to find the bucket. Let's hope it
+        // doesn't change though, layouts are useful information for allocators!
         self.dispatch(layout).deallocate(address, layout)
     }
 

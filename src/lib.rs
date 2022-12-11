@@ -1,6 +1,5 @@
 #![feature(allocator_api)]
 #![feature(alloc_layout_extra)]
-#![feature(generic_const_exprs)]
 #![feature(is_some_and)]
 #![feature(nonnull_slice_from_raw_parts)]
 #![feature(strict_provenance)]
