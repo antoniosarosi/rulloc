@@ -843,7 +843,47 @@ mod tests {
                 second_addr_half_page_aligned.cast(),
                 second_layout_half_page_aligned,
             );
+            // No more regions, we've only worked with 2 pointers so far.
             assert_eq!(bucket.regions.len(), 0);
+
+            // Last but not least, let's try to force everything to be moved
+            // forward instead of backwards. For that, we are going to allocate
+            // an entire page and then increase alignment but decrease size.
+            let third_layout = Layout::from(first_layout);
+            let mut third_addr = bucket.allocate(third_layout).unwrap();
+            third_addr.as_mut().fill(corruption_check);
+
+            let third_layout_aligned_to_half_page =
+                Layout::from_size_align(8, page_size() / 2).unwrap();
+            let third_addr_aligned_to_half_page = bucket
+                .shrink(
+                    third_addr.cast(),
+                    third_layout,
+                    third_layout_aligned_to_half_page,
+                )
+                .unwrap();
+
+            check_mem_corruption(
+                &third_addr_aligned_to_half_page.as_ref()
+                    [..third_layout_aligned_to_half_page.size()],
+                corruption_check,
+            );
+            assert_eq!(bucket.regions.len(), 1);
+            assert_eq!(bucket.free_blocks.len(), 1);
+            assert_eq!(
+                third_addr_aligned_to_half_page.as_mut_ptr() as usize % (page_size() / 2),
+                0
+            );
+            assert!(
+                third_addr_aligned_to_half_page
+                    .as_mut_ptr()
+                    .offset_from(third_addr.as_mut_ptr())
+                    > 0
+            );
+            bucket.deallocate(
+                third_addr_aligned_to_half_page.cast(),
+                third_layout_aligned_to_half_page,
+            );
         }
     }
 }
