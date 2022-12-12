@@ -468,7 +468,7 @@ mod tests {
 
                     // Miri is really slow, but we don't need as many operations
                     // to find bugs with it.
-                    let num_allocs = if cfg!(miri) { 20 } else { 2000 };
+                    let num_allocs = if cfg!(miri) { 20 } else { 1000 };
 
                     for layout in layouts {
                         barrier.wait();

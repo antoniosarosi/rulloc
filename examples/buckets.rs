@@ -16,7 +16,7 @@ fn main() {
 
     println!("Allocator configured with bucket sizes 8, 16 and 24.");
     println!("Notice how addresses are located in different regions.");
-    println!("If page size is 4096 bytes there should 4KB of difference between them:");
+    println!("If page size is 4096 bytes there should be 4KB of difference between them:");
 
     unsafe {
         let layout1 = Layout::array::<u8>(8).unwrap();

@@ -121,7 +121,7 @@ use crate::{
 /// the current tail will point to the new tail located in the new region.
 /// Because of this, we cannot make any assumptions regarding positioning when
 /// it comes to free blocks. All this process of splitting blocks, merging them
-/// again and updating the free list is handled at [`crate::allocator`].
+/// again and updating the free list is handled at [`crate::bucket::Bucket`].
 ///
 /// # Free list implementation
 ///
