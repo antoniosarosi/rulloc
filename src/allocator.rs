@@ -1,6 +1,5 @@
 use std::{
     alloc::{AllocError, Allocator, GlobalAlloc, Layout},
-    cell::UnsafeCell,
     ptr::{self, NonNull},
     sync::Mutex,
 };
@@ -55,7 +54,7 @@ use crate::{bucket::Bucket, realloc::Realloc, AllocResult};
 ///
 /// Number of buckets and size of each bucket can be configured at compile
 /// time. This struct is not thread safe and it also needs mutable borrows to
-/// operate, so it has to be wrapped in [`UnsafeCell`] to satisfy
+/// operate, so it has to be wrapped in some container like [`Mutex`] to satisfy
 /// [`std::alloc::Allocator`] trait. See [`MmapAllocator`] for the public API.
 ///
 /// # Drop
@@ -178,7 +177,7 @@ pub struct MmapAllocator<const N: usize = 3> {
     /// This is technically O(n) but as long as we don't have thousands of
     /// threads it won't be an issue. If we end up needing to allocate
     /// memory for ourselves, we can just use [`crate::mmap`].
-    allocator: Mutex<UnsafeCell<InternalAllocator<N>>>,
+    allocator: Mutex<InternalAllocator<N>>,
 }
 
 unsafe impl<const N: usize> Sync for MmapAllocator<N> {}
@@ -187,9 +186,7 @@ impl MmapAllocator {
     /// Default configuration includes 3 buckets of sizes 128, 1024 and 8192.
     pub const fn with_default_config() -> Self {
         Self {
-            allocator: Mutex::new(UnsafeCell::new(InternalAllocator::with_bucket_sizes([
-                128, 1024, 8192,
-            ]))),
+            allocator: Mutex::new(InternalAllocator::with_bucket_sizes([128, 1024, 8192])),
         }
     }
 }
@@ -198,7 +195,7 @@ impl<const N: usize> MmapAllocator<N> {
     /// Builds a new allocator configured with the given bucket sizes.
     pub fn with_bucket_sizes(sizes: [usize; N]) -> Self {
         Self {
-            allocator: Mutex::new(UnsafeCell::new(InternalAllocator::with_bucket_sizes(sizes))),
+            allocator: Mutex::new(InternalAllocator::with_bucket_sizes(sizes)),
         }
     }
 }
@@ -213,7 +210,7 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         unsafe {
             match self.allocator.lock() {
-                Ok(mut allocator) => allocator.get_mut().allocate(layout),
+                Ok(mut allocator) => allocator.allocate(layout),
                 Err(_) => Err(AllocError),
             }
         }
@@ -221,7 +218,7 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
 
     unsafe fn deallocate(&self, address: NonNull<u8>, layout: Layout) {
         if let Ok(mut allocator) = self.allocator.lock() {
-            allocator.get_mut().deallocate(address, layout)
+            allocator.deallocate(address, layout)
         }
     }
 
@@ -232,9 +229,9 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
         new_layout: Layout,
     ) -> AllocResult {
         match self.allocator.lock() {
-            Ok(mut allocator) => allocator
-                .get_mut()
-                .reallocate(&Realloc::shrink(address, old_layout, new_layout)),
+            Ok(mut allocator) => {
+                allocator.reallocate(&Realloc::shrink(address, old_layout, new_layout))
+            }
             Err(_) => Err(AllocError),
         }
     }
@@ -246,9 +243,9 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
         new_layout: Layout,
     ) -> AllocResult {
         match self.allocator.lock() {
-            Ok(mut allocator) => allocator
-                .get_mut()
-                .reallocate(&Realloc::grow(address, old_layout, new_layout)),
+            Ok(mut allocator) => {
+                allocator.reallocate(&Realloc::grow(address, old_layout, new_layout))
+            }
             Err(_) => Err(AllocError),
         }
     }
@@ -401,13 +398,11 @@ mod tests {
     }
 
     fn verify_buckets_are_empty(allocator: MmapAllocator) {
-        unsafe {
-            let internal = allocator.allocator.lock().unwrap().get();
-            for bucket in &(*internal).buckets {
-                assert_eq!(bucket.regions().len(), 0);
-            }
-            assert_eq!((*internal).dyn_bucket.regions().len(), 0);
+        let internal = allocator.allocator.lock().unwrap();
+        for bucket in &internal.buckets {
+            assert_eq!(bucket.regions().len(), 0);
         }
+        assert_eq!(internal.dyn_bucket.regions().len(), 0);
     }
 
     /// We'll make all the threads do only allocs at the same time, then wait
