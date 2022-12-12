@@ -5,11 +5,7 @@ use std::{
     sync::Mutex,
 };
 
-use crate::{
-    bucket::Bucket,
-    realloc::{Realloc, ReallocMethod},
-    AllocResult,
-};
+use crate::{bucket::Bucket, realloc::Realloc, AllocResult};
 
 /// This is the main allocator, it contains multiple allocation buckets for
 /// different sizes. Once you've read [`crate::header`], [`crate::block`],
@@ -233,12 +229,9 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
         new_layout: Layout,
     ) -> AllocResult {
         match self.allocator.lock() {
-            Ok(mut allocator) => allocator.get_mut().reallocate(&Realloc::new(
-                address,
-                old_layout,
-                new_layout,
-                ReallocMethod::Shrink,
-            )),
+            Ok(mut allocator) => allocator
+                .get_mut()
+                .reallocate(&Realloc::shrink(address, old_layout, new_layout)),
             Err(_) => Err(AllocError),
         }
     }
@@ -250,12 +243,9 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
         new_layout: Layout,
     ) -> AllocResult {
         match self.allocator.lock() {
-            Ok(mut allocator) => allocator.get_mut().reallocate(&Realloc::new(
-                address,
-                old_layout,
-                new_layout,
-                ReallocMethod::Grow,
-            )),
+            Ok(mut allocator) => allocator
+                .get_mut()
+                .reallocate(&Realloc::grow(address, old_layout, new_layout)),
             Err(_) => Err(AllocError),
         }
     }

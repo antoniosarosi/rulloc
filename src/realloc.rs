@@ -52,6 +52,16 @@ impl Realloc {
         }
     }
 
+    /// Shorter syntax for building a new [`Realloc`] with [`ReallocMethod::Shrink`].
+    pub unsafe fn shrink(address: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Self {
+        Self::new(address, old_layout, new_layout, ReallocMethod::Shrink)
+    }
+
+    /// Shorter syntax for building a new [`Realloc`] with [`ReallocMethod::Grow`].
+    pub unsafe fn grow(address: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Self {
+        Self::new(address, old_layout, new_layout, ReallocMethod::Grow)
+    }
+
     /// Number of bytes that should be copied from the previous allocation. If
     /// we are shrinking, we only need to copy enough bytes to fill the new
     /// layout, otherwise we'll copy everything from the previous layout.
@@ -62,8 +72,8 @@ impl Realloc {
         }
     }
 
-    /// Maps this [`Realloc`] to a new block. This is usefull for growing,
-    /// see [`crate::bucket`].
+    /// Maps this [`Realloc`] to a [`Realloc`] new block. This is usefull for
+    /// growing, see [`crate::bucket`].
     pub unsafe fn map(&self, block: NonNull<Header<Block>>) -> Self {
         Self { block, ..*self }
     }
