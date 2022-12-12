@@ -208,8 +208,8 @@ impl Bucket {
     }
 
     /// Block splitting algorithm implementation. Let's say we have a free block
-    /// that can hold 128 bytes and a request to allocate 8 bytes has been made.
-    /// We'll split the free block in two different blocks, like so:
+    /// that can hold 128 bytes and a request to allocate 24 bytes has been
+    /// made. We'll split the free block in two different blocks, like so:
     ///
     /// **Before**:
     ///
@@ -226,11 +226,11 @@ impl Bucket {
     ///         +-->  +-----------+
     ///         |     |   Header  | <- H bytes.
     /// Block 1 |     +-----------+
-    ///         |     |  Content  | <- 8 bytes.
+    ///         |     |  Content  | <- 24 bytes.
     ///         +-->  +-----------+
     ///         |     |   Header  | <- H bytes.
     /// Block 2 |     +-----------+
-    ///         |     |  Content  | <- 128 bytes - 8 bytes - H bytes.
+    ///         |     |  Content  | <- 128 bytes - 24 bytes - H bytes.
     ///         +-->  +-----------+
     /// ```
     ///
@@ -307,9 +307,9 @@ impl Bucket {
     ///                         +-->  +-----------+
     /// ```
     ///
-    /// Note that only one of the surrounding is merged if the other one is not
-    /// free. Also, if the previous block is merged, then the address of the
-    /// current block changes. That's why we have to return a pointer to a
+    /// Note that only one of the surrounding blocks is merged if the other one
+    /// is not free. Also, if the previous block is merged, then the address of
+    /// the current block changes. That's why we have to return a pointer to a
     /// block.
     ///
     /// # Safety
@@ -422,7 +422,7 @@ impl Bucket {
     }
 
     /// If everything else fails, just find or create a new block and move
-    /// everything there.
+    /// the contents there.
     pub unsafe fn try_reallocate_on_another_block(&mut self, realloc: &Realloc) -> AllocResult {
         let new_address = self.allocate(realloc.new_layout)?;
         ptr::copy_nonoverlapping(
@@ -436,7 +436,9 @@ impl Bucket {
     }
 
     /// If possible, this function will attempt to reallocate in place without
-    /// merging adjacent blocks or moving the contents to a new block.
+    /// merging adjacent blocks or moving the contents to a new block. This can
+    /// be done especially when alignment changes, because that makes the
+    /// padding change as well.
     pub unsafe fn try_reallocate_on_same_block(&mut self, realloc: &Realloc) -> AllocResult {
         // First let's try to see if we can fit the new layout in this block.
         let new_size = alignment::minimum_block_size_excluding_padding(realloc.new_layout);
@@ -522,7 +524,7 @@ impl Bucket {
         self.try_reallocate_on_same_block(realloc)
     }
 
-    /// As the name suggests, this function attempts to merge the next adjancent
+    /// As the name suggests, this function attempts to merge the next adjacent
     /// block to create a bigger one that fits the new layout.
     ///
     /// Before:
