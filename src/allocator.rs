@@ -262,6 +262,22 @@ unsafe impl GlobalAlloc for MmapAllocator {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         self.deallocate(NonNull::new_unchecked(ptr), layout)
     }
+
+    unsafe fn realloc(&self, address: *mut u8, old_layout: Layout, new_size: usize) -> *mut u8 {
+        let new_layout = Layout::from_size_align(new_size, old_layout.align()).unwrap();
+        let address = NonNull::new_unchecked(address);
+
+        let result = if old_layout.size() <= new_size {
+            self.shrink(address, old_layout, new_layout)
+        } else {
+            self.grow(address, old_layout, new_layout)
+        };
+
+        match result {
+            Ok(new_address) => new_address.as_mut_ptr(),
+            Err(_) => ptr::null_mut(),
+        }
+    }
 }
 
 #[cfg(test)]

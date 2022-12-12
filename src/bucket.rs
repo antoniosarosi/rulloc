@@ -619,11 +619,16 @@ impl Bucket {
                 total + next.as_ref().total_size()
             });
 
-        if total_size > new_size + padding {
+        if new_size + padding > total_size {
             return Err(AllocError);
         }
 
         for block in blocks.iter().rev().skip(1) {
+            // We skipped one, there should always be a next block.
+            let next = block.as_ref().next.unwrap();
+            if next.as_ref().is_free() {
+                self.free_blocks.remove_block(next);
+            }
             if block.as_ref().is_free() {
                 self.free_blocks.remove_block(*block);
             }
@@ -1048,6 +1053,143 @@ mod tests {
             bucket.deallocate(
                 third_addr_aligned_to_half_page.cast(),
                 third_layout_aligned_to_half_page,
+            );
+        }
+    }
+
+    #[test]
+    fn grow_by_consuming_next_or_prev() {
+        unsafe {
+            let mut bucket = Bucket::new();
+
+            let first_layout = Layout::from_size_align(MIN_BLOCK_SIZE, 4).unwrap();
+            let mut first_addr = bucket.allocate(first_layout).unwrap();
+            let corruption_check = 200;
+
+            first_addr.as_mut().fill(corruption_check);
+            let first_region = bucket.regions.first().unwrap();
+
+            // Let's test growth by consuming next block
+            let first_layout_grow_to_40 = Layout::from_size_align(40, 4).unwrap();
+            let first_addr_grow_to_40 = bucket
+                .reallocate(&Realloc::grow(
+                    first_addr.cast(),
+                    first_layout,
+                    first_layout_grow_to_40,
+                ))
+                .unwrap();
+
+            assert_eq!(bucket.regions.len(), 1);
+            assert_eq!(first_region.as_ref().num_blocks(), 2);
+            assert_eq!(bucket.free_blocks.len(), 1);
+            assert_eq!(first_addr_grow_to_40.len(), 40);
+            assert_eq!(first_addr.as_mut_ptr(), first_addr_grow_to_40.as_mut_ptr());
+            check_mem_corruption(
+                &first_addr_grow_to_40.as_ref()[..first_layout.size()],
+                corruption_check,
+            );
+
+            // Now let's try to consume the previous block
+            let second_layout = Layout::array::<u8>(
+                page_size()
+                    - REGION_HEADER_SIZE
+                    - 3 * BLOCK_HEADER_SIZE
+                    - first_region.as_ref().first_block().as_ref().size(),
+            )
+            .unwrap();
+            let mut second_addr = bucket.allocate(second_layout).unwrap();
+
+            let corruption_check = 3;
+            second_addr.as_mut().fill(corruption_check);
+
+            // This should set the first block free.
+            bucket.deallocate(first_addr_grow_to_40.cast(), first_layout_grow_to_40);
+            assert_eq!(bucket.free_blocks.len(), 1);
+
+            let second_layout_grow_to_page_size =
+                Layout::array::<u8>(page_size() - REGION_HEADER_SIZE - BLOCK_HEADER_SIZE).unwrap();
+
+            let second_addr_grow_to_page_size = bucket
+                .reallocate(&Realloc::grow(
+                    second_addr.cast(),
+                    second_layout,
+                    second_layout_grow_to_page_size,
+                ))
+                .unwrap();
+
+            // Should be the same as the first one because everything is moved
+            // to the first block again.
+            assert_eq!(
+                first_addr.as_mut_ptr(),
+                second_addr_grow_to_page_size.as_mut_ptr()
+            );
+            // We're using all the page, so no free blocks.
+            assert_eq!(bucket.free_blocks.len(), 0);
+            assert_eq!(first_region.as_ref().num_blocks(), 1);
+            check_mem_corruption(
+                &second_addr_grow_to_page_size.as_ref()[..second_addr.as_ref().len()],
+                corruption_check,
+            );
+
+            bucket.deallocate(
+                second_addr_grow_to_page_size.cast(),
+                second_layout_grow_to_page_size,
+            );
+        }
+    }
+
+    #[test]
+    fn grow_by_consuming_next_and_prev() {
+        unsafe {
+            let mut bucket = Bucket::new();
+
+            // Let's test the final case of growing blocks
+            let surrounding_blocks_layout = Layout::from_size_align(MIN_BLOCK_SIZE, 4).unwrap();
+            let block_in_the_middle_layout = Layout::array::<u8>(
+                page_size() - REGION_HEADER_SIZE - 3 * BLOCK_HEADER_SIZE - 2 * MIN_BLOCK_SIZE,
+            )
+            .unwrap();
+
+            let first_addr = bucket.allocate(surrounding_blocks_layout).unwrap();
+            let mut second_addr = bucket.allocate(block_in_the_middle_layout).unwrap();
+            let third_addr = bucket.allocate(surrounding_blocks_layout).unwrap();
+
+            // We've alredy tested allocations, but there should be 3 blocks and
+            // 0 free blocks.
+            let region = bucket.regions.first().unwrap();
+            assert_eq!(region.as_ref().num_blocks(), 3);
+            assert_eq!(bucket.free_blocks.len(), 0);
+
+            // Now this should construct the pattern we want to test
+            bucket.deallocate(first_addr.cast(), surrounding_blocks_layout);
+            bucket.deallocate(third_addr.cast(), surrounding_blocks_layout);
+            assert_eq!(bucket.free_blocks.len(), 2);
+
+            let corruption_check = 125;
+            second_addr.as_mut().fill(corruption_check);
+
+            let grow_layout = Layout::array::<u8>(
+                block_in_the_middle_layout.size() + 2 * MIN_BLOCK_SIZE + 2 * BLOCK_HEADER_SIZE,
+            )
+            .unwrap();
+            let second_addr_grow = bucket
+                .reallocate(&Realloc::grow(
+                    second_addr.cast(),
+                    block_in_the_middle_layout,
+                    grow_layout,
+                ))
+                .unwrap();
+
+            // Only one block, no free blocks
+            assert_eq!(region.as_ref().num_blocks(), 1);
+            assert_eq!(bucket.free_blocks.len(), 0);
+
+            // We're back at the beginning again
+            assert_eq!(second_addr_grow.as_mut_ptr(), first_addr.as_mut_ptr());
+
+            check_mem_corruption(
+                &second_addr_grow.as_ref()[..second_addr.as_ref().len()],
+                corruption_check,
             );
         }
     }
