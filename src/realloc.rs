@@ -15,7 +15,7 @@ pub(crate) struct Realloc {
     pub new_layout: Layout,
     /// Layout of the previous allocation.
     pub old_layout: Layout,
-    /// For now, whether shrinks or grows.
+    /// For now, whether shrink or grow.
     pub method: ReallocMethod,
 }
 
@@ -72,8 +72,8 @@ impl Realloc {
         }
     }
 
-    /// Maps this [`Realloc`] to a [`Realloc`] new block. This is usefull for
-    /// growing, see [`crate::bucket`].
+    /// Maps this [`Realloc`] to a [`Realloc`] on a new block. This is usefull
+    /// for growing, see [`crate::bucket`].
     pub unsafe fn map(&self, block: NonNull<Header<Block>>) -> Self {
         Self { block, ..*self }
     }

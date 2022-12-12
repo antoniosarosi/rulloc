@@ -235,9 +235,9 @@ impl Bucket {
     /// ```
     ///
     /// The block doesn't necessarily have to be free, it might be in use but
-    /// we want to shrink it. See [`Self::shrink`]. This function does not touch
-    /// the contents of the block, it only changes it's header to reflect the
-    /// new size. On the other hand, the new block created in the splitting
+    /// we want to shrink it. See [`Self::shrink_block`]. This function does not
+    /// touch the contents of the block, it only changes it's header to reflect
+    /// the new size. On the other hand, the new block created in the splitting
     /// process is automatically added to the free list.
     ///
     /// # Safety
@@ -314,7 +314,7 @@ impl Bucket {
     ///
     /// # Safety
     ///
-    /// Unlike [`Self::split_free_block`], the caller must guarantee that
+    /// Unlike [`Self::split_block_if_possible`], the caller must guarantee that
     /// `block` is free in this case.
     #[rustfmt::skip]
     unsafe fn merge_surrounding_free_blocks_if_possible(
@@ -672,8 +672,8 @@ mod tests {
 
             // We'll use this later to check memory corruption. The allocator
             // should not touch the content of any block.
-            let corruption_check = 69;
-            first_addr.as_mut().fill(corruption_check);
+            let first_addr_corruption_check = 69;
+            first_addr.as_mut().fill(first_addr_corruption_check);
 
             // First region should be PAGE_SIZE in length.
             let first_region = bucket.regions.first().unwrap();
@@ -709,7 +709,8 @@ mod tests {
             let mut second_addr = bucket.allocate(second_layout).unwrap();
 
             // We'll check corruption later.
-            second_addr.as_mut().fill(corruption_check);
+            let second_addr_corruption_check = 42;
+            second_addr.as_mut().fill(second_addr_corruption_check);
 
             // There are 3 blocks now, last one is still free.
             assert_eq!(first_region.as_ref().num_blocks(), 3);
@@ -724,7 +725,8 @@ mod tests {
             let third_layout = Layout::array::<u8>(remaining_size).unwrap();
             let mut third_addr = bucket.allocate(third_layout).unwrap();
 
-            third_addr.as_mut().fill(corruption_check);
+            let third_addr_corruption_check = 107;
+            third_addr.as_mut().fill(third_addr_corruption_check);
 
             // Number of blocks hasn't changed, but we don't have free blocks
             // anymore.
@@ -732,15 +734,16 @@ mod tests {
             assert_eq!(bucket.free_blocks.len(), 0);
 
             // Time for checking memory corruption
-            check_mem_corruption(first_addr.as_ref(), corruption_check);
-            check_mem_corruption(second_addr.as_ref(), corruption_check);
-            check_mem_corruption(third_addr.as_ref(), corruption_check);
+            check_mem_corruption(first_addr.as_ref(), first_addr_corruption_check);
+            check_mem_corruption(second_addr.as_ref(), second_addr_corruption_check);
+            check_mem_corruption(third_addr.as_ref(), third_addr_corruption_check);
 
             // Let's request a bigger chunk so that a new region is used.
             let fourth_layout = Layout::array::<u8>(PAGE_SIZE * 2 - PAGE_SIZE / 2).unwrap();
             let mut fourth_addr = bucket.allocate(fourth_layout).unwrap();
 
-            fourth_addr.as_mut().fill(corruption_check);
+            let fourth_addr_corruption_check = 205;
+            fourth_addr.as_mut().fill(fourth_addr_corruption_check);
 
             // We should have a new region and a new free block now.
             assert_eq!(bucket.regions.len(), 2);
@@ -770,7 +773,7 @@ mod tests {
             assert_eq!(bucket.free_blocks.len(), 1);
 
             // Check mem corruption in the last block
-            check_mem_corruption(fourth_addr.as_ref(), corruption_check);
+            check_mem_corruption(fourth_addr.as_ref(), fourth_addr_corruption_check);
 
             // Deallocating fourh address should unmap the last region.
             bucket.deallocate(fourth_addr.cast(), fourth_layout);
@@ -879,7 +882,7 @@ mod tests {
     #[test]
     fn shrink() {
         unsafe {
-            let corruption_check = 42;
+            let mut corruption_check = 42;
             let mut bucket = Bucket::new();
 
             // Allocate entire page.
@@ -931,6 +934,7 @@ mod tests {
             assert_eq!(first_region.as_ref().num_blocks(), 2);
             assert_eq!(bucket.free_blocks.len(), 0);
 
+            corruption_check -= 10;
             second_addr.as_mut().fill(corruption_check);
 
             // Let's use page size alignment to force reallocation, because
@@ -1021,6 +1025,7 @@ mod tests {
             // an entire page and then increase alignment but decrease size.
             let third_layout = Layout::from(first_layout);
             let mut third_addr = bucket.allocate(third_layout).unwrap();
+            corruption_check += 15;
             third_addr.as_mut().fill(corruption_check);
 
             let third_layout_aligned_to_half_page =
@@ -1064,7 +1069,7 @@ mod tests {
 
             let first_layout = Layout::from_size_align(MIN_BLOCK_SIZE, 4).unwrap();
             let mut first_addr = bucket.allocate(first_layout).unwrap();
-            let corruption_check = 200;
+            let mut corruption_check = 200;
 
             first_addr.as_mut().fill(corruption_check);
             let first_region = bucket.regions.first().unwrap();
@@ -1099,7 +1104,7 @@ mod tests {
             .unwrap();
             let mut second_addr = bucket.allocate(second_layout).unwrap();
 
-            let corruption_check = 3;
+            corruption_check = 3;
             second_addr.as_mut().fill(corruption_check);
 
             // This should set the first block free.

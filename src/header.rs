@@ -39,15 +39,15 @@ impl<T> Header<T> {
     /// Returns the address after the header.
     ///
     /// ```text
-    /// +---------+
-    /// | Header  | <- Header<T> struct.
-    /// +---------+
-    /// | Content | <- Returned address points to the first cell after header.
-    /// +---------+
-    /// |   ...   |
-    /// +---------+
-    /// |   ...   |
-    /// +---------+
+    /// +-------------+
+    /// |  Header<T>  | <- Header<T> struct.
+    /// +-------------+
+    /// |   Content   | <- Returned address points to the first cell after header.
+    /// +-------------+
+    /// |     ...     |
+    /// +-------------+
+    /// |     ...     |
+    /// +-------------+
     /// ```
     ///
     /// # Safety

@@ -106,17 +106,20 @@ impl<const N: usize> InternalAllocator<N> {
 
     /// Returns a mutable reference to the [`Bucket`] where `layout` should be
     /// allocated.
+    #[inline]
     fn dispatch(&mut self, layout: Layout) -> &mut Bucket {
         self.bucket_mut(self.bucket_index_of(layout))
     }
 
     /// Returns an address where `layout.size()` bytes can be safely written or
     /// [`AllocError`] if it fails to allocate.
+    #[inline]
     pub unsafe fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         self.dispatch(layout).allocate(layout)
     }
 
     /// Deallocates the memory block at `address`.
+    #[inline]
     pub unsafe fn deallocate(&mut self, address: NonNull<u8>, layout: Layout) {
         // We can find the bucket that has allocated the pointer because we also
         // know the layout. If the allocator trait changes and the layout is
@@ -296,24 +299,22 @@ mod tests {
         unsafe {
             let layout1 = Layout::array::<u8>(8).unwrap();
             let mut addr1 = allocator.allocate(layout1).unwrap();
-            let slice1 = addr1.as_mut();
 
-            slice1.fill(69);
+            addr1.as_mut().fill(69);
 
             let layout2 = Layout::array::<u8>(PAGE_SIZE * 2).unwrap();
             let mut addr2 = allocator.allocate(layout2).unwrap();
-            let slice2 = addr2.as_mut();
 
-            slice2.fill(69);
+            addr2.as_mut().fill(42);
 
-            for value in slice1 {
+            for value in addr1.as_ref() {
                 assert_eq!(value, &69);
             }
 
             allocator.deallocate(addr1.cast(), layout1);
 
-            for value in slice2 {
-                assert_eq!(value, &69);
+            for value in addr2.as_ref() {
+                assert_eq!(value, &42);
             }
 
             allocator.deallocate(addr2.cast(), layout2);
@@ -362,6 +363,25 @@ mod tests {
 
             allocator.deallocate(addr4, layout4);
             assert_eq!(allocator.dyn_bucket.regions().len(), 0);
+
+            // Now let's try some reallocs
+            let mut realloc_addr = allocator.allocate(layout1).unwrap();
+            let corruption_check = 213;
+            realloc_addr.as_mut().fill(corruption_check);
+
+            realloc_addr = allocator
+                .reallocate(&Realloc::grow(realloc_addr.cast(), layout1, layout2))
+                .unwrap();
+            verify_number_of_regions_per_bucket!([0, 1, 0]);
+
+            realloc_addr = allocator
+                .reallocate(&Realloc::grow(realloc_addr.cast(), layout2, layout3))
+                .unwrap();
+            verify_number_of_regions_per_bucket!([0, 0, 1]);
+
+            for value in &realloc_addr.as_ref()[..layout1.size()] {
+                assert_eq!(*value, corruption_check);
+            }
         }
     }
 
