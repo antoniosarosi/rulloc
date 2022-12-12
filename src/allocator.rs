@@ -252,6 +252,21 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
             Err(_) => Err(AllocError),
         }
     }
+
+    unsafe fn grow_zeroed(
+        &self,
+        address: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> AllocResult {
+        let new_address = self.grow(address, old_layout, new_layout)?;
+        let zero_from = new_address
+            .as_mut_ptr()
+            .map_addr(|addr| addr + old_layout.size());
+        zero_from.write_bytes(0, new_layout.size() - old_layout.size());
+
+        Ok(new_address)
+    }
 }
 
 unsafe impl GlobalAlloc for MmapAllocator {
