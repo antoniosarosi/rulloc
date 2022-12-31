@@ -203,16 +203,13 @@ mod tests {
     use std::{mem, ptr::NonNull};
 
     use super::*;
-    use crate::{
-        mmap::{mmap, munmap},
-        region::page_size,
-    };
+    use crate::platform;
 
     #[test]
     fn linked_list_operations() {
         unsafe {
             let mut list: LinkedList<u8> = LinkedList::new();
-            let region = mmap(page_size()).unwrap();
+            let region = platform::request_memory(platform::page_size()).unwrap();
             let size = mem::size_of::<Node<u8>>();
 
             // N1 <-> N2 <-> N3
@@ -296,7 +293,7 @@ mod tests {
             assert_eq!(list.head, None);
             assert_eq!(list.len, 0);
 
-            munmap(region, page_size());
+            platform::return_memory(region, platform::page_size());
         }
     }
 }

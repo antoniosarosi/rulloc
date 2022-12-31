@@ -4,28 +4,11 @@ use crate::{
     block::{Block, BLOCK_HEADER_SIZE, MIN_BLOCK_SIZE},
     header::Header,
     list::LinkedList,
+    platform,
 };
 
 /// Region header size in bytes. See [`Header<T>`] and [`Region`].
 pub(crate) const REGION_HEADER_SIZE: usize = mem::size_of::<Header<Region>>();
-
-/// Virtual memory page size. 4096 bytes on most computers. This should be a
-/// constant but we don't know the value at compile time.
-pub(crate) static mut PAGE_SIZE: usize = 0;
-
-/// We only know the value of the page size at runtime by calliing
-/// [`libc::sysconf`], so we'll call that function once and then mutate a global
-/// variable to reuse it.
-#[inline]
-pub(crate) fn page_size() -> usize {
-    unsafe {
-        if PAGE_SIZE == 0 {
-            PAGE_SIZE = libc::sysconf(libc::_SC_PAGE_SIZE) as usize
-        }
-
-        PAGE_SIZE
-    }
-}
 
 /// Memory region specific data. All headers are also linked lists nodes, see
 /// [`Header<T>`] and [`Block`]. In this case, a complete region header would be
@@ -98,7 +81,7 @@ pub(crate) fn determine_region_length(size: usize) -> usize {
     // Align up to page size. If we want to store 4104 bytes and page size is
     // 4096 bytes, then we'll request a region that's 2 pages in length
     // (8192 bytes).
-    let mut length = Layout::from_size_align(total_size, page_size())
+    let mut length = Layout::from_size_align(total_size, platform::page_size())
         .unwrap()
         .pad_to_align()
         .size();
@@ -150,7 +133,7 @@ pub(crate) fn determine_region_length(size: usize) -> usize {
     // this will only help reduce fragmentation when mapping new regions, but
     // anything can happen from there on.
     if total_size < length && total_size + BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE > length {
-        length += page_size();
+        length += platform::page_size();
     }
 
     length
@@ -159,13 +142,13 @@ pub(crate) fn determine_region_length(size: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alignment::POINTER_SIZE;
+    use crate::{alignment::POINTER_SIZE, platform::PAGE_SIZE};
 
     #[test]
     fn region_length() {
         unsafe {
             // Basic checks.
-            assert_eq!(determine_region_length(POINTER_SIZE), page_size());
+            assert_eq!(determine_region_length(POINTER_SIZE), platform::page_size());
             assert_eq!(determine_region_length(PAGE_SIZE / 2), PAGE_SIZE);
             for i in 1..=100 {
                 assert_eq!(determine_region_length(PAGE_SIZE * i), PAGE_SIZE * (i + 1));

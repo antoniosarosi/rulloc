@@ -14,7 +14,7 @@ mod bucket;
 mod freelist;
 mod header;
 mod list;
-mod mmap;
+mod platform;
 mod realloc;
 mod region;
 

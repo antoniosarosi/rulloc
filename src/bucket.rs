@@ -10,7 +10,7 @@ use crate::{
     freelist::FreeList,
     header::Header,
     list::LinkedList,
-    mmap::{mmap, munmap},
+    platform,
     realloc::{Realloc, ReallocMethod},
     region::{determine_region_length, Region, REGION_HEADER_SIZE},
     AllocResult, Pointer,
@@ -109,7 +109,7 @@ impl Bucket {
             // Region has to be removed before unmapping, otherwise seg fault.
             self.regions.remove(region);
 
-            munmap(region.cast(), region.as_ref().total_size());
+            platform::return_memory(region.cast(), region.as_ref().total_size());
         }
     }
 
@@ -181,7 +181,7 @@ impl Bucket {
     ) -> Result<NonNull<Header<Region>>, AllocError> {
         let length = determine_region_length(size);
 
-        let address = mmap(length).ok_or(AllocError)?;
+        let address = platform::request_memory(length).ok_or(AllocError)?;
 
         let mut region = self.regions.append(
             Region {
@@ -642,7 +642,7 @@ impl Bucket {
 impl Drop for Bucket {
     fn drop(&mut self) {
         for region in &*self.regions {
-            unsafe { munmap(region.cast(), region.as_ref().total_size()) }
+            unsafe { platform::return_memory(region.cast(), region.as_ref().total_size()) }
         }
     }
 }
@@ -652,7 +652,7 @@ mod tests {
     use super::*;
     use crate::{
         alignment::AlignmentBackPointer,
-        region::{page_size, PAGE_SIZE},
+        platform::{page_size, PAGE_SIZE},
     };
 
     fn check_mem_corruption(chunk: &[u8], corruption_check: u8) {

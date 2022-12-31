@@ -311,7 +311,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::region::PAGE_SIZE;
+    use crate::platform::PAGE_SIZE;
 
     #[test]
     fn internal_allocator_wrapper() {
