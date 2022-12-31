@@ -138,20 +138,20 @@ impl<const N: usize> InternalAllocator<N> {
         let current_bucket = self.bucket_index_of(realloc.old_layout);
         let ideal_bucket = self.bucket_index_of(realloc.new_layout);
 
-        if current_bucket != ideal_bucket {
-            let new_address = self.bucket_mut(ideal_bucket).allocate(realloc.new_layout)?;
-            ptr::copy_nonoverlapping(
-                realloc.address.as_ptr(),
-                new_address.as_mut_ptr(),
-                realloc.count(),
-            );
-            self.bucket_mut(current_bucket)
-                .deallocate(realloc.address, realloc.old_layout);
-
-            Ok(new_address)
-        } else {
-            self.bucket_mut(current_bucket).reallocate(realloc)
+        if current_bucket == ideal_bucket {
+            return self.bucket_mut(current_bucket).reallocate(realloc);
         }
+
+        let new_address = self.bucket_mut(ideal_bucket).allocate(realloc.new_layout)?;
+        ptr::copy_nonoverlapping(
+            realloc.address.as_ptr(),
+            new_address.as_mut_ptr(),
+            realloc.count(),
+        );
+        self.bucket_mut(current_bucket)
+            .deallocate(realloc.address, realloc.old_layout);
+
+        Ok(new_address)
     }
 }
 
