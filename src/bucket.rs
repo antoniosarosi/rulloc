@@ -414,7 +414,7 @@ impl Bucket {
     /// new size doesn't fit even after merging surrounding blocks or if
     /// alignment has increased drastically and we didn't find any aligned
     /// address in the current block.
-    pub unsafe fn try_reallocate_in_place(&mut self, realloc: &Realloc) -> AllocResult {
+    unsafe fn try_reallocate_in_place(&mut self, realloc: &Realloc) -> AllocResult {
         match realloc.method {
             ReallocMethod::Shrink => self.try_shrink_in_place(realloc),
             ReallocMethod::Grow => self.try_grow_in_place(realloc),
@@ -423,7 +423,7 @@ impl Bucket {
 
     /// If everything else fails, just find or create a new block and move
     /// the contents there.
-    pub unsafe fn try_reallocate_on_another_block(&mut self, realloc: &Realloc) -> AllocResult {
+    unsafe fn try_reallocate_on_another_block(&mut self, realloc: &Realloc) -> AllocResult {
         let new_address = self.allocate(realloc.new_layout)?;
         ptr::copy_nonoverlapping(
             realloc.address.as_ptr(),
@@ -439,7 +439,7 @@ impl Bucket {
     /// merging adjacent blocks or moving the contents to a new block. This can
     /// be done especially when alignment changes, because that makes the
     /// padding change as well.
-    pub unsafe fn try_reallocate_on_same_block(&mut self, realloc: &Realloc) -> AllocResult {
+    unsafe fn try_reallocate_on_same_block(&mut self, realloc: &Realloc) -> AllocResult {
         // First let's try to see if we can fit the new layout in this block.
         let new_size = alignment::minimum_block_size_excluding_padding(realloc.new_layout);
         let (next_aligned, padding) = alignment::next_aligned(

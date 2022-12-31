@@ -113,7 +113,7 @@ impl<const N: usize> InternalAllocator<N> {
     /// Returns an address where `layout.size()` bytes can be safely written or
     /// [`AllocError`] if it fails to allocate.
     #[inline]
-    pub unsafe fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    pub unsafe fn allocate(&mut self, layout: Layout) -> AllocResult {
         self.dispatch(layout).allocate(layout)
     }
 
@@ -207,7 +207,7 @@ impl Default for MmapAllocator {
 }
 
 unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
-    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    fn allocate(&self, layout: Layout) -> AllocResult {
         unsafe {
             match self.allocator.lock() {
                 Ok(mut allocator) => allocator.allocate(layout),
