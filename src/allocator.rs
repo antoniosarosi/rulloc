@@ -168,15 +168,23 @@ pub struct MmapAllocator<const N: usize = 3> {
     /// size changes drastically. If each [`Bucket`] has its own lock, we have
     /// to handle deadlocks properly with [`Mutex::try_lock`].
     ///
-    /// 2. Don't use any [`Mutex`] at all, have one entire allocator per thread.
+    /// 2. Use a fixed number of allocators and distribute requests from
+    /// different threads between them (round-robin, for example). Each
+    /// allocator could have a global [`Mutex`] or one [`Mutex`] per [`Bucket`]
+    /// like mentioned above.
+    ///
+    /// 3. Don't use any [`Mutex`] at all, have one entire allocator per thread.
     /// Conceptually, we would need a mapping of [`std::thread::ThreadId`] to
     /// [`InternalAllocator`]. Instead of using general data structures that
     /// need to allocate memory, such as hash maps, we could use a fixed size
     /// array and store a tuple of `(ThreadId, Bucket)`. Each allocation will
     /// perform a linear scan to find the [`Bucket`] where we should allocate.
     /// This is technically O(n) but as long as we don't have thousands of
-    /// threads it won't be an issue. If we end up needing to allocate
-    /// memory for ourselves, we can just use [`crate::mmap`].
+    /// threads it won't be an issue. If we end up needing to allocate memory
+    /// for ourselves, we can just use [`crate::mmap`]. The issue with this
+    /// approach is that we have to deal with threads that deallocate memory
+    /// which was not allocated by themselves, so we need more than a simple
+    /// mapping.
     allocator: Mutex<InternalAllocator<N>>,
 }
 
