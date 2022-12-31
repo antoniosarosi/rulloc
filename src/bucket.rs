@@ -181,9 +181,7 @@ impl Bucket {
     ) -> Result<NonNull<Header<Region>>, AllocError> {
         let length = determine_region_length(size);
 
-        let Some(address) = mmap(length) else {
-            return Err(AllocError);
-        };
+        let address = mmap(length).ok_or(AllocError)?;
 
         let mut region = self.regions.append(
             Region {
@@ -544,7 +542,7 @@ impl Bucket {
     /// ```
     unsafe fn try_grow_by_merging_next_block(&mut self, realloc: &Realloc) -> AllocResult {
         let Realloc { block, .. } = realloc;
-        let Some (next) = block.as_ref().next else { return Err(AllocError) };
+        let next = block.as_ref().next.ok_or(AllocError)?;
         self.try_grow_by_merging(&[*block, next], realloc)
     }
 
@@ -568,7 +566,7 @@ impl Bucket {
     /// ```
     unsafe fn try_grow_by_merging_prev_block(&mut self, realloc: &Realloc) -> AllocResult {
         let Realloc { block, .. } = realloc;
-        let Some (prev) = block.as_ref().prev else { return Err(AllocError) };
+        let prev = block.as_ref().prev.ok_or(AllocError)?;
         self.try_grow_by_merging(&[prev, *block], realloc)
     }
 
@@ -592,8 +590,8 @@ impl Bucket {
     /// ```
     unsafe fn try_grow_by_merging_both_blocks(&mut self, realloc: &Realloc) -> AllocResult {
         let Realloc { block, .. } = realloc;
-        let Some(next) = block.as_ref().next else { return Err(AllocError) };
-        let Some(prev) = block.as_ref().prev else { return Err(AllocError) };
+        let next = block.as_ref().next.ok_or(AllocError)?;
+        let prev = block.as_ref().prev.ok_or(AllocError)?;
         self.try_grow_by_merging(&[prev, *block, next], realloc)
     }
 
