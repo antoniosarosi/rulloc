@@ -163,8 +163,8 @@ use crate::{
 /// because the user doesn't have pointers to the content address anymore, all
 /// of them should have been dropped. If users still maintain pointers to
 /// deallocated addresses they will run into use after free, so they better not
-/// use such pointers! For finding bugs related to this kind of problems,
-/// [Miri](https://github.com/rust-lang/miri) is really helpful.
+/// use such pointers! [Miri](https://github.com/rust-lang/miri) is really
+/// helpful for finding bugs related to this kind of problems.
 pub(crate) type FreeListNode = Node<()>;
 
 /// See [`FreeListNode`].

@@ -27,10 +27,10 @@ impl<T> Header<T> {
     /// # Safety
     ///
     /// Caller must guarantee that the given address points exactly to the first
-    /// memory cell after a [`Header<T>`]. This function will be mostly used for
+    /// memory cell after a [`Header<T>`]. This function will mostly be used for
     /// deallocating memory, so the allocator user should give us an address
-    /// that we previously provided when allocating. As long as that's true,
-    /// this is safe, otherwise it's undefined behaviour.
+    /// that we previously allocated. As long as that's true, this is safe,
+    /// otherwise it's undefined behaviour.
     #[inline]
     pub unsafe fn from_content_address(address: NonNull<u8>) -> NonNull<Self> {
         NonNull::new_unchecked(address.as_ptr().cast::<Self>().offset(-1))
@@ -55,13 +55,14 @@ impl<T> Header<T> {
     /// If `header` is a valid [`NonNull<Header<T>>`], the offset will return an
     /// address that points right after the header. That address is safe to use
     /// as long as no more than `size` bytes are written, where `size` is a
-    /// field of [`Block`] or [`Region`].
+    /// field of [`crate::block::Block`] or [`crate::region::Region`].
     ///
     /// # Notes
     ///
     /// - We are using this function as `Header::content_address_of(header)`
-    /// because we want to avoid creating references to `self` to keep Miri
-    /// happy. See [Stacked Borrows](https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md).
+    /// instead of `header.content_address()` because we want to avoid creating
+    /// intermediary references to `self` to keep Miri happy. See
+    /// [Stacked Borrows](https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md).
     #[inline]
     pub unsafe fn content_address_of(header: NonNull<Self>) -> NonNull<u8> {
         NonNull::new_unchecked(header.as_ptr().offset(1)).cast()
