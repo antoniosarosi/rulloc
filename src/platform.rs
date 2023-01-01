@@ -2,9 +2,9 @@ use std::ptr::NonNull;
 
 use crate::Pointer;
 
-/// Abstraction for platform specific memory handling. The allocator only needs to
-/// request pages of memory and return them back when they are no longer in use,
-/// but it doesn't care about the APIs offered by the underlying kernel or
+/// Abstraction for platform specific memory handling. The allocator only needs
+/// to request pages of memory and return them back when they are no longer in
+/// use, but it doesn't care about the APIs offered by the underlying kernel or
 /// libraries.
 trait PlatformSpecificMemory {
     /// Requests a memory region to the kernel where `length` bytes can be
@@ -53,7 +53,7 @@ pub unsafe fn return_memory(address: NonNull<u8>, length: usize) {
 #[cfg(unix)]
 #[cfg(not(miri))]
 mod unix {
-    use std::ptr::NonNull;
+    use std::ptr::{self, NonNull};
 
     use libc;
 
@@ -108,8 +108,8 @@ mod windows {
             let protection = Memory::PAGE_READWRITE;
 
             // This works a little bit different from mmap, memory has to be
-            // reserved first and then committed in order to become usable. We can
-            // do both at the same time with one single call.
+            // reserved first and then committed in order to become usable. We
+            // can do both at the same time with one single call.
             let flags = Memory::MEM_RESERVE | Memory::MEM_COMMIT;
 
             // For more detailed explanations of each parameter, see
@@ -124,9 +124,9 @@ mod windows {
         }
 
         unsafe fn return_memory(address: NonNull<u8>, _length: usize) {
-            // Again, we have to decommit memory first and then release it. We can
-            // skip decommitting by specifying length of 0 and MEM_RELEASE flag.
-            // See the docs for details:
+            // Again, we have to decommit memory first and then release it. We
+            // can skip decommitting by specifying length of 0 and MEM_RELEASE
+            // flag. See the docs for details:
             // https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualfree#parameters
             let address = address.cast::<std::ffi::c_void>().as_ptr();
             let length = 0;
@@ -150,10 +150,10 @@ mod windows {
 #[cfg(miri)]
 mod miri {
     //! When using Miri, we can't rely on system calls such as `mmap` because
-    //! there's no FFI support, so instead we'll use the global allocator to mock
-    //! low level memory managament. This is also useful for detecting memory
-    //! leaks in our own allocator (regions that are not returned back to the
-    //! kernel).
+    //! there's no FFI support, so instead we'll use the global allocator to
+    //! mock low level memory managament. This is also useful for detecting
+    //! memory leaks in our own allocator (regions that are not returned back to
+    //! the kernel).
 
     use std::{alloc, ptr::NonNull};
 
