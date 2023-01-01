@@ -14,7 +14,7 @@ fn print_alloc(addr: NonNull<u8>, layout: Layout) {
         layout.align()
     );
     println!(
-        "{addr:?} % {} = {}",
+        "Alignment check: {addr:?} % {} = {}",
         layout.align(),
         addr.as_ptr() as usize % layout.align()
     );
