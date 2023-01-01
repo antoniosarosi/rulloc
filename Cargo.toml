@@ -2,6 +2,12 @@
 name = "rulloc"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/antoniosarosi/rulloc"
+license-file = "LICENCE"
+readme = "README.md"
+description = "General purpose memory allocator"
+categories = ["memory-management"]
+keywords = ["memory-allocator"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.137"
