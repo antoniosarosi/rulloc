@@ -641,9 +641,9 @@ impl Bucket {
 
 impl Drop for Bucket {
     fn drop(&mut self) {
-        for region in &*self.regions {
-            unsafe { platform::return_memory(region.cast(), region.as_ref().total_size()) }
-        }
+        self.regions.iter().for_each(|region| unsafe {
+            platform::return_memory(region.cast(), region.as_ref().total_size());
+        });
     }
 }
 
