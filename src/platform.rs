@@ -124,7 +124,7 @@ mod windows {
             // can skip decommitting by specifying length of 0 and MEM_RELEASE
             // flag. See the docs for details:
             // https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualfree#parameters
-            let address = address.cast::<std::ffi::c_void>().as_ptr();
+            let address = address.cast().as_ptr();
             let length = 0;
             let flags = Memory::MEM_RELEASE;
 
@@ -156,15 +156,13 @@ mod miri {
     use super::{page_size, Platform, PlatformSpecificMemory};
     use crate::Pointer;
 
-    fn to_layout(length: usize) -> std::alloc::Layout {
+    fn to_layout(length: usize) -> alloc::Layout {
         alloc::Layout::from_size_align(length, page_size()).unwrap()
     }
 
     impl PlatformSpecificMemory for Platform {
         unsafe fn request_memory(length: usize) -> Pointer<u8> {
-            let address = alloc::alloc(to_layout(length));
-
-            Some(NonNull::new_unchecked(address))
+            NonNull::new(alloc::alloc(to_layout(length)))
         }
 
         unsafe fn return_memory(address: NonNull<u8>, length: usize) {
