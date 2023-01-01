@@ -41,11 +41,13 @@ pub(crate) fn page_size() -> usize {
 }
 
 /// Convinience wrapper for [`PlatformSpecificMemory::request_memory`].
+#[inline]
 pub(crate) unsafe fn request_memory(length: usize) -> Pointer<u8> {
     Platform::request_memory(length)
 }
 
 /// Convinience wrapper for [`PlatformSpecificMemory::return_memory`].
+#[inline]
 pub(crate) unsafe fn return_memory(address: NonNull<u8>, length: usize) {
     Platform::return_memory(address, length)
 }
