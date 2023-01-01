@@ -5,7 +5,7 @@ use std::{
     ptr::NonNull,
 };
 
-use memalloc::MmapAllocator;
+use rulloc::Rulloc;
 
 fn print_alloc(addr: NonNull<u8>, layout: Layout) {
     println!(
@@ -21,7 +21,7 @@ fn print_alloc(addr: NonNull<u8>, layout: Layout) {
 }
 
 fn main() {
-    let allocator = MmapAllocator::with_default_config();
+    let allocator = Rulloc::default();
 
     unsafe {
         let layout1 = Layout::from_size_align(1, 16).unwrap();

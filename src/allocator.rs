@@ -13,43 +13,42 @@ use crate::{bucket::Bucket, realloc::Realloc, AllocResult};
 ///
 /// ```text
 ///                                           Next Free Block                    Next Free Block
-///                                |------------------------------------+   +-----------------------+
+///                                +------------------------------------+   +-----------------------+
 ///                                |                                    |   |                       |
 ///               +--------+-------|----------------+      +--------+---|---|-----------------------|-----+
 ///               |        | +-----|-+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
 /// buckets[0] -> | Region | | Free  | -> | Block | | ---> | Region | | Free  | -> | Block | -> | Free  | |
 ///               |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
-///               +--------+------------------------+      ---------+-------------------------------------+
+///               +--------+------------------------+      +--------+-------------------------------------+
 ///
-///                                           Next Free Block                    Next Free Block
-///                                |------------------------------------+   +-----------------------+
-///                                |                                    |   |                       |
-///               +--------+-------|----------------+      +--------+---|---|-----------------------|-----+
-///               |        | +-----|-+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
-/// buckets[1] -> | Region | | Free  | -> | Block | | ---> | Region | | Free  | -> | Block | -> | Free  | |
+///                                                         Next Free Block
+///                                           +----------------------------------------+
+///                                           |                                        |
+///               +--------+------------------|-----+      +--------+------------------|------------------+
+///               |        | +-------+    +---|---+ |      |        | +-------+    +---|---+    +-------+ |
+/// buckets[1] -> | Region | | Block | -> | Free  | | ---> | Region | | Block | -> | Free  | -> | Block | |
 ///               |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
-///               +--------+------------------------+      ---------+-------------------------------------+
+///               +--------+------------------------+      +--------+-------------------------------------+
 ///
-/// ...........
+/// .......................................................................................................
 ///
-///                                             Next Free Block                    Next Free Block
-///                                  |------------------------------------+   +-----------------------+
-///                                  |                                    |   |                       |
-///                 +--------+-------|----------------+      +--------+---|---|-----------------------|-----+
-///                 |        | +-----|-+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
-/// buckets[N-1] -> | Region | | Free  | -> | Block | | ---> | Region | | Free  | -> | Block | -> | Free  | |
+///                                                     Next Free Block
+///                                             +---------------------------+
+///                                             |                           |
+///                 +--------+------------------|-----+      +--------+-----|-------------------------------+
+///                 |        | +-------+    +---|---+ |      |        | +---|---+    +-------+    +-------+ |
+/// buckets[N-1] -> | Region | | Block | -> | Free  | | ---> | Region | | Free  | -> | Block | -> | Block | |
 ///                 |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
-///                 +--------+------------------------+      ---------+-------------------------------------+
+///                 +--------+------------------------+      +--------+-------------------------------------+
 ///
-///                                           Next Free Block                    Next Free Block
-///                                |------------------------------------+   +-----------------------+
-///                                |                                    |   |                       |
-///               +--------+-------|----------------+      +--------+---|---|-----------------------|-----+
-///               |        | +-----|-+    +-------+ |      |        | +-|---|-+    +-------+    +---|---+ |
-/// dyn_bucket -> | Region | | Free  | -> | Block | | ---> | Region | | Free  | -> | Block | -> | Free  | |
-///               |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
-///               +--------+------------------------+      ---------+-------------------------------------+
-///
+///                                                     Next Free Block
+///                                +-----------------------------------------------------+
+///                                |                                                     |
+///                 +--------+-----|------------------+      +--------+------------------|------------------+
+///                 |        | +---|---+    +-------+ |      |        | +-------+    +---|---+    +-------+ |
+/// dyn_bucket ->   | Region | | Free  | -> | Block | | ---> | Region | | Block | -> | Free  | -> | Block | |
+///                 |        | +-------+    +-------+ |      |        | +-------+    +-------+    +-------+ |
+///                 +--------+------------------------+      +--------+-------------------------------------+
 /// ```
 ///
 /// Number of buckets and size of each bucket can be configured at compile
@@ -158,7 +157,7 @@ impl<const N: usize> InternalAllocator<N> {
 /// General purpose allocator. All memory is requested from the kernel using
 /// [`libc::mmap`] and some tricks and optimizations are implemented such as
 /// free list, block coalescing, block splitting and allocation buckets.
-pub struct MmapAllocator<const N: usize = 3> {
+pub struct Rulloc<const N: usize = 3> {
     /// Currently we use a global [`Mutex`] to access the allocator, but here
     /// are some ideas to further optimize multithreaded allocations:
     ///
@@ -188,9 +187,9 @@ pub struct MmapAllocator<const N: usize = 3> {
     allocator: Mutex<InternalAllocator<N>>,
 }
 
-unsafe impl<const N: usize> Sync for MmapAllocator<N> {}
+unsafe impl<const N: usize> Sync for Rulloc<N> {}
 
-impl MmapAllocator {
+impl Rulloc {
     /// Default configuration includes 3 buckets of sizes 128, 1024 and 8192.
     pub const fn with_default_config() -> Self {
         Self {
@@ -199,7 +198,7 @@ impl MmapAllocator {
     }
 }
 
-impl<const N: usize> MmapAllocator<N> {
+impl<const N: usize> Rulloc<N> {
     /// Builds a new allocator configured with the given bucket sizes.
     pub fn with_bucket_sizes(sizes: [usize; N]) -> Self {
         Self {
@@ -208,13 +207,13 @@ impl<const N: usize> MmapAllocator<N> {
     }
 }
 
-impl Default for MmapAllocator {
+impl Default for Rulloc {
     fn default() -> Self {
-        MmapAllocator::with_default_config()
+        Rulloc::with_default_config()
     }
 }
 
-unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
+unsafe impl<const N: usize> Allocator for Rulloc<N> {
     fn allocate(&self, layout: Layout) -> AllocResult {
         unsafe {
             match self.allocator.lock() {
@@ -274,7 +273,7 @@ unsafe impl<const N: usize> Allocator for MmapAllocator<N> {
     }
 }
 
-unsafe impl GlobalAlloc for MmapAllocator {
+unsafe impl GlobalAlloc for Rulloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match self.allocate(layout) {
             Ok(address) => address.cast().as_ptr(),
@@ -315,7 +314,7 @@ mod tests {
 
     #[test]
     fn internal_allocator_wrapper() {
-        let allocator = MmapAllocator::with_default_config();
+        let allocator = Rulloc::with_default_config();
         unsafe {
             let layout1 = Layout::array::<u8>(8).unwrap();
             let mut addr1 = allocator.allocate(layout1).unwrap();
@@ -405,7 +404,7 @@ mod tests {
         }
     }
 
-    fn verify_buckets_are_empty(allocator: MmapAllocator) {
+    fn verify_buckets_are_empty(allocator: Rulloc) {
         let internal = allocator.allocator.lock().unwrap();
         for bucket in &internal.buckets {
             assert_eq!(bucket.regions().len(), 0);
@@ -417,7 +416,7 @@ mod tests {
     /// and do only deallocs at the same time.
     #[test]
     fn multiple_threads_synchronized_allocs_and_deallocs() {
-        let allocator = MmapAllocator::with_default_config();
+        let allocator = Rulloc::with_default_config();
 
         let num_threads = 8;
 
@@ -454,7 +453,7 @@ mod tests {
     /// interchangeably.
     #[test]
     fn multiple_threads_unsynchronized_allocs_and_deallocs() {
-        let allocator = MmapAllocator::with_default_config();
+        let allocator = Rulloc::with_default_config();
 
         let num_threads = 8;
 

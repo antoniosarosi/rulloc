@@ -5,7 +5,7 @@ use std::{
     ptr::NonNull,
 };
 
-use memalloc::MmapAllocator;
+use rulloc::Rulloc;
 
 fn print_alloc(addr: NonNull<u8>, layout: Layout) {
     println!("Requested {} bytes of memory", layout.size());
@@ -13,7 +13,7 @@ fn print_alloc(addr: NonNull<u8>, layout: Layout) {
 }
 
 fn main() {
-    let allocator = MmapAllocator::with_default_config();
+    let allocator = Rulloc::default();
 
     unsafe {
         let layout1 = Layout::new::<u8>();

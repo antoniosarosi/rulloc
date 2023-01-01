@@ -5,14 +5,14 @@ use std::{
     ptr::NonNull,
 };
 
-use memalloc::MmapAllocator;
+use rulloc::Rulloc;
 
 fn print_alloc(addr: NonNull<u8>, layout: Layout) {
     println!("Alloc of {} bytes at {addr:?}", layout.size());
 }
 
 fn main() {
-    let allocator = MmapAllocator::<3>::with_bucket_sizes([8, 16, 24]);
+    let allocator = Rulloc::<3>::with_bucket_sizes([8, 16, 24]);
 
     println!("Allocator configured with bucket sizes 8, 16 and 24.");
     println!("Notice how addresses are located in different regions.");

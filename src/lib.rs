@@ -27,4 +27,4 @@ pub(crate) type Pointer<T> = Option<NonNull<T>>;
 /// Shorter syntax for allocation/reallocation return types.
 pub(crate) type AllocResult = Result<NonNull<[u8]>, AllocError>;
 
-pub use allocator::MmapAllocator;
+pub use allocator::Rulloc;

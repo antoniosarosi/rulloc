@@ -1,4 +1,4 @@
-use memalloc::MmapAllocator;
+use rulloc::Rulloc;
 
 // NOTE: This example doesn't work with Miri because we use the global alocator
 // to simulate `mmap` calls when `cfg!(miri)`. If we are the global allocator,
@@ -16,7 +16,7 @@ use memalloc::MmapAllocator;
 // within ourselves :(
 
 #[global_allocator]
-static ALLOCATOR: MmapAllocator = MmapAllocator::with_default_config();
+static ALLOCATOR: Rulloc = Rulloc::with_default_config();
 
 fn main() {
     let num = Box::new(10);
