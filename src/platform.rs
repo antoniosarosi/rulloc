@@ -62,9 +62,6 @@ mod unix {
 
     impl PlatformSpecificMemory for Platform {
         unsafe fn request_memory(length: usize) -> Pointer<u8> {
-            // C void null pointer. This is what we need to request memory.
-            let null = ptr::null_mut::<libc::c_void>();
-
             // Memory protection. Read-Write only.
             let protection = libc::PROT_READ | libc::PROT_WRITE;
 
@@ -73,14 +70,14 @@ mod unix {
 
             // For all the configuration options that `mmap` accepts see
             // https://man7.org/linux/man-pages/man2/mmap.2.html
-            match libc::mmap(null, length, protection, flags, -1, 0) {
+            match libc::mmap(ptr::null_mut(), length, protection, flags, -1, 0) {
                 libc::MAP_FAILED => None,
                 address => Some(NonNull::new_unchecked(address).cast()),
             }
         }
 
         unsafe fn return_memory(address: NonNull<u8>, length: usize) {
-            if libc::munmap(address.cast::<libc::c_void>().as_ptr(), length) != 0 {
+            if libc::munmap(address.cast().as_ptr(), length) != 0 {
                 // TODO: What should we do here? Panic? Memory region is still
                 // valid here, it wasn't unmapped.
             }
