@@ -75,7 +75,7 @@ mod unix {
             // https://man7.org/linux/man-pages/man2/mmap.2.html
             match libc::mmap(null, length, protection, flags, -1, 0) {
                 libc::MAP_FAILED => None,
-                address => Some(NonNull::new_unchecked(address as *mut u8)),
+                address => Some(NonNull::new_unchecked(address).cast()),
             }
         }
 
@@ -119,7 +119,7 @@ mod windows {
             if address.is_null() {
                 None
             } else {
-                Some(NonNull::new_unchecked(address as *mut u8))
+                Some(NonNull::new_unchecked(address).cast())
             }
         }
 

@@ -64,6 +64,6 @@ impl<T> Header<T> {
     /// happy. See [Stacked Borrows](https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md).
     #[inline]
     pub unsafe fn content_address_of(header: NonNull<Self>) -> NonNull<u8> {
-        NonNull::new_unchecked(header.as_ptr().offset(1) as *mut u8)
+        NonNull::new_unchecked(header.as_ptr().offset(1)).cast()
     }
 }
