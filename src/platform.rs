@@ -116,11 +116,7 @@ mod windows {
             // https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc#parameters
             let address = Memory::VirtualAlloc(None, length, flags, protection);
 
-            if address.is_null() {
-                None
-            } else {
-                Some(NonNull::new_unchecked(address).cast())
-            }
+            NonNull::new(address.cast())
         }
 
         unsafe fn return_memory(address: NonNull<u8>, _length: usize) {
