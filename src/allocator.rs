@@ -154,9 +154,71 @@ impl<const N: usize> InternalAllocator<N> {
     }
 }
 
-/// General purpose allocator. All memory is requested from the kernel using
-/// [`libc::mmap`] and some tricks and optimizations are implemented such as
-/// free list, block coalescing, block splitting and allocation buckets.
+/// This struct exposes the public interface by implementing
+/// [`std::alloc::Allocator`].
+///
+/// # Examples
+///
+/// ## Standalone allocator
+///
+/// ```rust
+/// #![feature(allocator_api)]
+/// #![feature(slice_ptr_get)]
+///
+/// use std::alloc::{Allocator, Layout};
+///
+/// use rulloc::Rulloc;
+///
+/// let rulloc = Rulloc::default();
+/// let (size, align) = (128, 8);
+/// let layout = Layout::from_size_align(size, align).unwrap();
+///
+/// unsafe {
+///     let address = rulloc.allocate(layout).unwrap();
+///     // The allocator can return more space than requested.
+///     assert!(address.len() >= size);
+///     // Alignment is guaranteed for any power of two.
+///     assert_eq!(address.as_mut_ptr() as usize % align, 0);
+///     // Deallocate the pointer.
+///     rulloc.deallocate(address.cast(), layout);
+/// }
+/// ```
+///
+/// ## Collections and [`Box`]
+///
+/// ```no_run
+/// #![feature(allocator_api)]
+///
+/// use std::alloc::Allocator;
+///
+/// use rulloc::Rulloc;
+///
+/// let rulloc = Rulloc::default();
+///
+/// // Any struct that supports the allocator API works with Rulloc.
+/// let mut num = Box::new_in(12, &rulloc);
+/// assert_eq!(*num, 12);
+///
+/// let mut vec = Vec::new_in(&rulloc);
+/// vec.push(5);
+/// assert_eq!(vec[0], 5);
+/// ```
+///
+/// ## Global allocator
+///
+/// ```no_run
+/// #![feature(allocator_api)]
+///
+/// use rulloc::Rulloc;
+///
+/// #[global_allocator]
+/// static ALLOCATOR: Rulloc = Rulloc::with_default_config();
+///
+/// fn main() {
+///     let num = Box::new(5);
+///     assert_eq!(*num, 5);
+/// }
+/// ```
 pub struct Rulloc<const N: usize = 3> {
     /// Currently we use a global [`Mutex`] to access the allocator, but here
     /// are some ideas to further optimize multithreaded allocations:
@@ -180,10 +242,10 @@ pub struct Rulloc<const N: usize = 3> {
     /// perform a linear scan to find the [`Bucket`] where we should allocate.
     /// This is technically O(n) but as long as we don't have thousands of
     /// threads it won't be an issue. If we end up needing to allocate memory
-    /// for ourselves, we can just use [`crate::mmap`]. The issue with this
-    /// approach is that we have to deal with threads that deallocate memory
-    /// which was not allocated by themselves, so we need more than a simple
-    /// mapping.
+    /// for ourselves, we can just use [`crate::platform::request_memory`]. The
+    /// issue with this approach is that we have to deal with threads that
+    /// deallocate memory which was not allocated by themselves, so we need more
+    /// than a simple mapping.
     allocator: Mutex<InternalAllocator<N>>,
 }
 
@@ -191,6 +253,7 @@ unsafe impl<const N: usize> Sync for Rulloc<N> {}
 
 impl Rulloc {
     /// Default configuration includes 3 buckets of sizes 128, 1024 and 8192.
+    /// See [`Rulloc::<N>::with_bucket_sizes`] for details.
     pub const fn with_default_config() -> Self {
         Self {
             allocator: Mutex::new(InternalAllocator::with_bucket_sizes([128, 1024, 8192])),
@@ -200,6 +263,36 @@ impl Rulloc {
 
 impl<const N: usize> Rulloc<N> {
     /// Builds a new allocator configured with the given bucket sizes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// #![feature(allocator_api)]
+    ///
+    /// use std::alloc::{Allocator, Layout};
+    ///
+    /// use rulloc::Rulloc;
+    ///
+    /// // 3 fixed size buckets. First one will contain allocations less than
+    /// // or equal to 64 bytes in size, second one will contain allocations
+    /// // less than or equal to 128 bytes, and so forth. Allocations larger
+    /// // than the last bucket size will be allocated separately.
+    /// let rulloc = Rulloc::<3>::with_bucket_sizes([64, 128, 256]);
+    ///
+    /// // Allocated in the first bucket.
+    /// let p1 = rulloc.allocate(Layout::from_size_align(64, 8).unwrap()).unwrap();
+    /// // Allocated in the second bucket.
+    /// let p2 = rulloc.allocate(Layout::from_size_align(100, 8).unwrap()).unwrap();
+    /// // Allocated in the third bucket.
+    /// let p3 = rulloc.allocate(Layout::from_size_align(210, 8).unwrap()).unwrap();
+    /// // Allocated in a dynamic bucket that can allocate any size.
+    /// let p4 = rulloc.allocate(Layout::from_size_align(512, 8).unwrap()).unwrap();
+    ///
+    /// assert!(p1.len() >= 64);
+    /// assert!(p2.len() >= 100);
+    /// assert!(p3.len() >= 210);
+    /// assert!(p4.len() >= 512);
+    /// ```
     pub fn with_bucket_sizes(sizes: [usize; N]) -> Self {
         Self {
             allocator: Mutex::new(InternalAllocator::with_bucket_sizes(sizes)),
