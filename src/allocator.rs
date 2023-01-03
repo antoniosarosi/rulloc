@@ -54,7 +54,7 @@ use crate::{bucket::Bucket, realloc::Realloc, AllocResult};
 /// Number of buckets and size of each bucket can be configured at compile
 /// time. This struct is not thread safe and it also needs mutable borrows to
 /// operate, so it has to be wrapped in some container like [`Mutex`] to satisfy
-/// [`std::alloc::Allocator`] trait. See [`MmapAllocator`] for the public API.
+/// [`std::alloc::Allocator`] trait. See [`Rulloc`] for the public API.
 ///
 /// # Drop
 ///
